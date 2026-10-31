@@ -1,0 +1,1302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Presenter Studio</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root {
+    --bg: #0e0f12; --panel: #17191e; --line: #2a2d35; --text: #e8e9ec; --muted: #9096a3;
+    --accent: #6c8cff; --rec: #ff4d5e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { flex: 1; position: relative; display: flex; align-items: center; justify-content: center;
+    padding: 16px; min-width: 0; gap: 16px; }
+  #viewCol { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 12px; min-width: 0; }
+  #view { position: relative; width: min(100%, calc((100vh - 32px) * 16 / 9)); }
+  #out { display: block; width: 100%; height: auto; aspect-ratio: 16/9;
+    background: #000; border-radius: 6px; box-shadow: 0 6px 30px rgba(0,0,0,.5); cursor: pointer; }
+  #counter { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,.6); padding: 4px 10px;
+    border-radius: 99px; font-variant-numeric: tabular-nums; pointer-events: none; }
+  #recBadge { position: absolute; top: 8px; right: 8px; background: var(--rec); padding: 4px 12px;
+    border-radius: 99px; font-weight: 600; display: none; font-variant-numeric: tabular-nums; pointer-events: none; }
+  #recBadge.paused { background: #d39b22; }
+  #countdown { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    font-size: 160px; font-weight: 700; color: #fff; text-shadow: 0 4px 30px rgba(0,0,0,.7); pointer-events: none; }
+
+  /* next slide + clock (presenter view only) */
+  #nextBox { display: none; width: 100%; }
+  #nextHead { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
+  #nextHead span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+  #clock { font-size: 32px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  #nextCanvas { display: block; width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 6px; opacity: .85; }
+
+  /* speaker notes: never drawn into the recording */
+  #notesPane { display: none; flex-direction: column; background: rgba(22,24,30,.92); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden; backdrop-filter: blur(8px); box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+  body.float-notes #notesPane { display: flex; position: absolute; z-index: 5; resize: both; min-width: 260px; min-height: 140px; }
+  #notesHead { display: flex; align-items: center; gap: 4px; padding: 6px 8px; cursor: move; user-select: none;
+    background: rgba(255,255,255,.04); border-bottom: 1px solid var(--line); }
+  #notesTitle { flex: 1; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #notesHead button { padding: 2px 8px; }
+  #notesText, #notesEdit { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 12px 16px; line-height: 1.45;
+    white-space: pre-wrap; font-size: var(--notes-size, 24px); }
+  #notesText.empty { color: var(--muted); font-style: italic; font-size: 15px; }
+  #notesEdit { display: none; width: 100%; resize: none; border: 0; outline: 0; background: rgba(0,0,0,.25);
+    color: var(--text); font-family: inherit; }
+  #pausedOverlay { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center;
+    justify-content: center; gap: 6px; background: rgba(0,0,0,.45); border-radius: 6px; pointer-events: none;
+    color: #fff; font-size: 30px; font-weight: 700; text-shadow: 0 2px 12px rgba(0,0,0,.6); text-align: center; }
+  #pausedOverlay small { font-size: 15px; font-weight: 500; opacity: .9; }
+  .notice { background: #2a2416; border: 1px solid #6b5520; border-radius: 8px; padding: 10px; margin: 10px 0; }
+  .notice[hidden], .modal[hidden] { display: none; }
+  .modal { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+    padding: 16px; background: rgba(0,0,0,.6); }
+  .modal-box { width: min(680px, 100%); max-height: 90vh; overflow: auto; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .modal-box h3 { margin: 0 0 8px; font-size: 16px; }
+  #scriptText { width: 100%; height: 220px; margin: 8px 0; resize: vertical; background: #101216; color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 13px/1.45 inherit; font-family: inherit; }
+  #scriptVersions label { display: block; padding: 8px 10px; margin: 6px 0; border: 1px solid var(--line);
+    border-radius: 8px; cursor: pointer; }
+  #scriptVersions label:has(input:checked) { border-color: var(--accent); }
+  #scriptVersions .preview { display: block; color: var(--muted); margin-top: 3px; font-size: 12px; }
+  #notesPane.editing #notesText { display: none; }
+  #notesPane.editing #notesEdit { display: block; }
+
+  body.presenter #stage { display: grid; grid-template-columns: minmax(260px, 36%) 1fr; align-items: stretch; height: 100vh; }
+  body.presenter #viewCol { justify-content: flex-start; }
+  body.presenter #view { width: 100%; }
+  body.presenter #nextBox { display: block; }
+  body.presenter #notesPane { display: flex; position: static; resize: none; min-height: 0;
+    width: auto !important; height: auto !important; }
+  #panel { width: 340px; flex-shrink: 0; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 8px 16px 24px; }
+  body.hide-panel #panel { display: none; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+    margin: 18px 0 8px; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row label { flex: 0 0 92px; color: var(--muted); }
+  .row input[type=range] { flex: 1; accent-color: var(--accent); }
+  .row output { width: 38px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  select, button { font: inherit; color: var(--text); background: #22252c; border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 10px; }
+  select { flex: 1; min-width: 0; }
+  button { cursor: pointer; }
+  button:hover { border-color: #3c4150; background: #282b33; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.rec { background: var(--rec); border-color: var(--rec); color: #fff; font-weight: 600; flex: 1; padding: 10px; }
+  button.active { border-color: var(--accent); color: var(--accent); }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btns button { flex: 1; }
+  .note { color: var(--muted); font-size: 12px; margin: 6px 0; }
+  .check { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
+  .check input { accent-color: var(--accent); }
+  input[type=color] { width: 36px; height: 28px; border: 1px solid var(--line); border-radius: 6px; background: none; padding: 2px; }
+  #meter { flex: 1; height: 6px; background: #22252c; border-radius: 3px; overflow: hidden; }
+  #meterFill { height: 100%; width: 0; background: #3ecf8e; transition: width .05s; }
+  #recordings a { display: block; color: var(--accent); margin: 4px 0; word-break: break-all; }
+  kbd { background: #22252c; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font-size: 11px; }
+  #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #2b2f38;
+    border: 1px solid var(--line); padding: 10px 16px; border-radius: 8px; display: none; max-width: 80vw; z-index: 9; }
+  .hidden-media { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; left: 0; top: 0; }
+  @media (max-width: 800px) { #app { flex-direction: column; height: auto; } #panel { width: auto; border-left: 0; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <main id="stage">
+    <div id="viewCol">
+      <div id="view">
+        <canvas id="out" width="1920" height="1080" title="Click: next slide"></canvas>
+        <div id="counter">No slides</div>
+        <div id="recBadge">● REC 00:00</div>
+        <div id="pausedOverlay">❚❚ Paused<small>Change slides if you like, then press P to resume (3-second countdown)</small></div>
+        <div id="countdown"></div>
+      </div>
+      <div id="nextBox">
+        <div id="nextHead"><span>Next slide</span><div id="clock"></div></div>
+        <canvas id="nextCanvas" width="640" height="360"></canvas>
+      </div>
+    </div>
+    <section id="notesPane">
+      <div id="notesHead">
+        <div id="notesTitle">Notes</div>
+        <button id="notesPrev" title="Previous slide">◀</button>
+        <button id="notesNext" title="Next slide">▶</button>
+        <button id="notesSmaller" title="Smaller text (−)">A−</button>
+        <button id="notesBigger" title="Bigger text (+)">A+</button>
+        <button id="notesEditBtn" title="Edit notes for this slide">✎</button>
+        <button id="notesClose" title="Close">×</button>
+      </div>
+      <div id="notesText"></div>
+      <textarea id="notesEdit" placeholder="Type your speaker notes for this slide…"></textarea>
+    </section>
+  </main>
+
+  <aside id="panel">
+    <h2>Slides</h2>
+    <div class="btns">
+      <button id="btnPdf" class="primary">Open PDF</button>
+      <button id="btnImgs">Images</button>
+      <button id="btnScreen">Share window</button>
+    </div>
+    <p class="note">Tip: export PowerPoint / Google Slides as <b>PDF</b> for the sharpest result. Need animations or video? Use <b>Share window</b> on the PowerPoint slideshow.</p>
+    <div class="btns">
+      <button id="btnPrev">◀ Prev</button>
+      <button id="btnNext">Next ▶</button>
+    </div>
+    <div class="row"><label>Background</label><input type="color" data-k="bg"></div>
+
+    <h2>Speaker notes</h2>
+    <div class="btns">
+      <button id="btnFloat">Floating notes</button>
+      <button id="btnPresenter">Presenter view</button>
+    </div>
+    <div class="btns" style="margin-top:6px">
+      <button id="btnScript">Import script (text)</button>
+      <button id="btnPptx">Import from .pptx</button>
+    </div>
+    <div class="btns" style="margin-top:6px">
+      <button id="btnNotesBackup">Back up all notes</button>
+      <button id="btnNotesRestore">Restore backup</button>
+    </div>
+    <p class="note">Notes only show on your screen and are never recorded. Click ✎ on the notes box to type or edit them. Notes are saved per PDF file name.</p>
+
+    <h2>Camera</h2>
+    <label class="check"><input type="checkbox" data-k="cam.on"> Show my face <kbd>C</kbd></label>
+    <div class="row"><label>Camera</label><select id="camSel"></select></div>
+    <p class="note" id="camInfo"></p>
+    <div class="row"><label>Position</label>
+      <div class="btns" style="flex:1">
+        <button data-corner="tl">↖</button><button data-corner="tr">↗</button>
+        <button data-corner="bl">↙</button><button data-corner="br">↘</button>
+      </div>
+    </div>
+    <div class="row"><label>Shape</label>
+      <select data-k="cam.shape">
+        <option value="circle">Circle</option>
+        <option value="rounded">Rounded 4:3</option>
+        <option value="wide">Rounded 16:9</option>
+      </select>
+    </div>
+    <div class="row"><label>Size</label><input type="range" data-k="cam.size" min="0.1" max="0.45" step="0.01"><output></output></div>
+    <div class="row"><label>Zoom</label><input type="range" data-k="cam.zoom" min="1" max="3" step="0.05"><output></output></div>
+    <div class="row"><label>Move ←→</label><input type="range" data-k="cam.panX" min="-1" max="1" step="0.02"><output></output></div>
+    <div class="row"><label>Move ↑↓</label><input type="range" data-k="cam.panY" min="-1" max="1" step="0.02"><output></output></div>
+    <div class="row"><label>Edge gap</label><input type="range" data-k="cam.margin" min="0" max="0.08" step="0.005"><output></output></div>
+    <div class="row"><label>Border</label><input type="range" data-k="cam.border" min="0" max="16" step="1"><output></output><input type="color" data-k="cam.borderColor"></div>
+    <label class="check"><input type="checkbox" data-k="cam.mirror"> Mirror (like a selfie)</label>
+    <label class="check"><input type="checkbox" data-k="cam.blur"> Blur background <kbd>B</kbd></label>
+    <div class="row"><label>Blur amount</label><input type="range" data-k="cam.blurAmt" min="0" max="1" step="0.01"><output></output></div>
+
+    <h2>Beauty</h2>
+    <label class="check"><input type="checkbox" data-k="beauty.on"> Enable beauty filter</label>
+    <div class="btns">
+      <button data-preset="natural">Natural</button>
+      <button data-preset="soft">Soft</button>
+      <button data-preset="glow">Glow</button>
+    </div>
+    <div class="row"><label>Smooth skin</label><input type="range" data-k="beauty.smooth" min="0" max="1" step="0.01"><output></output></div>
+    <div class="row"><label>Brighten</label><input type="range" data-k="beauty.bright" min="0" max="1" step="0.01"><output></output></div>
+    <div class="row"><label>Warmth</label><input type="range" data-k="beauty.warm" min="-1" max="1" step="0.01"><output></output></div>
+    <div class="row"><label>Colour</label><input type="range" data-k="beauty.sat" min="-0.5" max="0.6" step="0.01"><output></output></div>
+    <div class="row"><label>Eye/hair detail</label><input type="range" data-k="beauty.sharp" min="0" max="1" step="0.01"><output></output></div>
+    <label class="check"><input type="checkbox" data-k="beauty.skinOnly"> Smooth skin only (keeps eyes &amp; hair sharp)</label>
+
+    <h2>Recording</h2>
+    <div class="row"><label>Resolution</label>
+      <select data-k="res">
+        <option value="1080">1080p (1920×1080)</option>
+        <option value="1440">1440p (2560×1440)</option>
+        <option value="2160">4K (3840×2160)</option>
+      </select>
+    </div>
+    <div class="row"><label>Quality</label>
+      <select data-k="quality">
+        <option value="standard">Standard (smaller file)</option>
+        <option value="high">High</option>
+        <option value="max">Maximum</option>
+      </select>
+    </div>
+    <div class="row"><label>Microphone</label><select id="micSel"></select></div>
+    <div class="row"><label>Mic level</label><div id="meter"><div id="meterFill"></div></div></div>
+    <div class="btns" style="margin-top:12px">
+      <button id="btnRec" class="rec">● Start recording</button>
+      <button id="btnPause" disabled>Pause</button>
+    </div>
+    <p class="note" id="fmtNote"></p>
+    <div id="recoverBox" class="notice" hidden>
+      <div id="recoverInfo"></div>
+      <div class="btns" style="margin-top:8px">
+        <button id="btnRecover" class="primary">Save it</button>
+        <button id="btnDiscard">Discard</button>
+      </div>
+    </div>
+    <div id="recordings"></div>
+
+    <h2>Shortcuts</h2>
+    <p class="note">
+      <kbd>→</kbd> <kbd>Space</kbd> <kbd>PgDn</kbd> next · <kbd>←</kbd> <kbd>PgUp</kbd> previous<br>
+      <kbd>R</kbd> start/stop recording · <kbd>P</kbd> pause · <kbd>C</kbd> camera · <kbd>H</kbd> hide this panel<br>
+      <kbd>N</kbd> floating notes · <kbd>V</kbd> presenter view · <kbd>+</kbd> <kbd>−</kbd> notes text size · <kbd>Esc</kbd> finish editing<br>
+      Presentation clickers work too. Keep this tab open while recording.
+    </p>
+  </aside>
+</div>
+
+<input type="file" id="filePdf" accept="application/pdf" hidden>
+<input type="file" id="fileImgs" accept="image/*" multiple hidden>
+<input type="file" id="filePptx" accept=".pptx" hidden>
+<input type="file" id="fileNotesJson" accept=".json,application/json" hidden>
+<input type="file" id="fileScript" accept=".txt,.md,text/plain,text/markdown" hidden>
+
+<div id="scriptModal" class="modal" hidden>
+  <div class="modal-box">
+    <h3>Import speaker notes from your script</h3>
+    <p class="note">Paste your script below, or choose a .txt / .md file. Each slide starts with a line like
+      <b>Slide 3: Title (About 45 seconds.)</b>. The part in brackets is kept as a cue at the top of that slide's note.</p>
+    <textarea id="scriptText" placeholder="Slide 1: Title (Look at the camera.)&#10;&#10;What I'll say on slide 1…&#10;&#10;Slide 2: …"></textarea>
+    <div class="btns"><button id="scriptFileBtn">Choose file…</button></div>
+    <div id="scriptVersions"></div>
+    <p class="note" id="scriptTarget"></p>
+    <div class="btns">
+      <button id="scriptCancel">Cancel</button>
+      <button id="scriptImport" class="primary" disabled>Import</button>
+    </div>
+  </div>
+</div>
+<video id="camVideo" class="hidden-media" muted playsinline></video>
+<video id="screenVideo" class="hidden-media" muted playsinline></video>
+<div id="toast"></div>
+
+<script>
+(() => {
+'use strict';
+const $ = s => document.querySelector(s);
+
+// ---------- settings ----------
+const DEFAULTS = {
+  res: 1080, quality: 'high', bg: '#111111',
+  cam: { on: true, corner: 'br', shape: 'circle', size: 0.22, margin: 0.025, zoom: 1.3,
+         panX: 0, panY: -0.1, mirror: true, border: 4, borderColor: '#ffffff', blur: false, blurAmt: 0.6 },
+  beauty: { on: true, smooth: 0.55, bright: 0.15, warm: 0.1, sat: 0.06, sharp: 0.35, skinOnly: true },
+  view: 'normal',
+  notes: { float: false, size: 26, x: 32, y: 32, w: 460, h: 280 },
+};
+const PRESETS = {
+  natural: { on: true, smooth: 0.4, bright: 0.1, warm: 0.05, sat: 0.04, sharp: 0.3 },
+  soft:    { on: true, smooth: 0.7, bright: 0.2, warm: 0.12, sat: 0.06, sharp: 0.4 },
+  glow:    { on: true, smooth: 0.85, bright: 0.35, warm: 0.2, sat: 0.1, sharp: 0.45 },
+};
+function deepMerge(a, b) {
+  for (const k in b) {
+    if (!(k in a)) continue;
+    if (a[k] && typeof a[k] === 'object') deepMerge(a[k], b[k] || {});
+    else a[k] = b[k];
+  }
+  return a;
+}
+let S = structuredClone(DEFAULTS);
+try { const saved = JSON.parse(localStorage.getItem('presenter-studio')); if (saved) deepMerge(S, saved); } catch {}
+function save() { try { localStorage.setItem('presenter-studio', JSON.stringify(S)); } catch {} }
+const getK = p => p.split('.').reduce((o, k) => o[k], S);
+const setK = (p, v) => { const ks = p.split('.'), last = ks.pop(); ks.reduce((o, k) => o[k], S)[last] = v; };
+
+function toast(msg, ms = 4000) {
+  const t = $('#toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display = 'none', ms);
+}
+
+// ---------- output canvas ----------
+const out = $('#out');
+const ctx = out.getContext('2d', { alpha: false });
+let W = 1920, H = 1080;
+function applyRes() {
+  H = S.res; W = Math.round(H * 16 / 9);
+  out.width = W; out.height = H;
+  pageCache.clear();
+  if (slides.mode === 'pdf') showPage(slides.page);
+}
+
+// ---------- slides ----------
+const slides = { mode: 'none', pdf: null, count: 0, page: 1, images: [], img: null };
+const pageCache = new Map();
+const screenVideo = $('#screenVideo');
+let screenStream = null;
+
+if (window.pdfjsLib) {
+  // Run the pdf.js worker via a same-origin blob so it works from localhost or file://
+  const workerUrl = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  pdfjsLib.GlobalWorkerOptions.workerPort =
+    new Worker(URL.createObjectURL(new Blob([`importScripts("${workerUrl}");`], { type: 'text/javascript' })));
+}
+
+function renderPage(n) {
+  const key = n;
+  if (pageCache.has(key)) {
+    const p = pageCache.get(key); pageCache.delete(key); pageCache.set(key, p); return p;
+  }
+  const p = (async () => {
+    const page = await slides.pdf.getPage(n);
+    const vp1 = page.getViewport({ scale: 1 });
+    const scale = Math.min(W / vp1.width, H / vp1.height);
+    const vp = page.getViewport({ scale });
+    const c = document.createElement('canvas');
+    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const cctx = c.getContext('2d');
+    cctx.fillStyle = '#fff'; cctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: cctx, viewport: vp }).promise;
+    return c;
+  })();
+  pageCache.set(key, p);
+  while (pageCache.size > 5) pageCache.delete(pageCache.keys().next().value);
+  return p;
+}
+
+function showPage(n) {
+  if (slides.mode === 'pdf') {
+    n = Math.max(1, Math.min(slides.count, n));
+    slides.page = n;
+    renderPage(n).then(c => { if (slides.page === n) slides.img = c; }).catch(e => toast('PDF: ' + e.message));
+    if (n < slides.count) renderPage(n + 1).catch(() => {});
+  } else if (slides.mode === 'images') {
+    n = Math.max(1, Math.min(slides.count, n));
+    slides.page = n; slides.img = slides.images[n - 1];
+  } else {
+    // screen share / no slides: arrows only step through the notes
+    slides.page = Math.max(1, n);
+  }
+  updateCounter();
+  renderNotes();
+  renderNext();
+}
+function nextSlide() { showPage(slides.page + 1); }
+function prevSlide() { showPage(slides.page - 1); }
+
+function updateCounter() {
+  const c = $('#counter');
+  if (slides.mode === 'pdf' || slides.mode === 'images') c.textContent = `Slide ${slides.page} / ${slides.count}`;
+  else if (slides.mode === 'screen') c.textContent = 'Sharing window';
+  else c.textContent = 'No slides';
+}
+
+function stopScreen() {
+  if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+  screenStream = null; screenVideo.srcObject = null;
+}
+
+$('#btnPdf').onclick = () => $('#filePdf').click();
+$('#btnImgs').onclick = () => $('#fileImgs').click();
+$('#filePdf').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  if (!window.pdfjsLib) return toast('PDF library failed to load. Check your internet connection and reload.');
+  try {
+    const pdf = await pdfjsLib.getDocument({ data: await f.arrayBuffer() }).promise;
+    stopScreen();
+    slides.mode = 'pdf'; slides.pdf = pdf; slides.count = pdf.numPages; slides.img = null;
+    pageCache.clear(); loadNotes(docKey(f.name)); showPage(1);
+    toast(`Loaded ${f.name} (${pdf.numPages} slides)`);
+  } catch (err) { toast('Could not open PDF: ' + err.message); }
+  e.target.value = '';
+};
+$('#fileImgs').onchange = async e => {
+  const files = [...e.target.files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (!files.length) return;
+  try {
+    const imgs = await Promise.all(files.map(f => createImageBitmap(f)));
+    stopScreen();
+    slides.mode = 'images'; slides.images = imgs; slides.count = imgs.length;
+    loadNotes(docKey(files[0].name)); showPage(1);
+    toast(`Loaded ${imgs.length} images`);
+  } catch (err) { toast('Could not load images: ' + err.message); }
+  e.target.value = '';
+};
+$('#btnScreen').onclick = async () => {
+  try {
+    const s = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } },
+      audio: false, selfBrowserSurface: 'exclude', surfaceSwitching: 'include',
+    });
+    stopScreen();
+    screenStream = s; screenVideo.srcObject = s; await screenVideo.play();
+    slides.mode = 'screen'; slides.img = null; slides.count = 0; showPage(1);
+    s.getVideoTracks()[0].addEventListener('ended', () => {
+      if (screenStream === s) { stopScreen(); slides.mode = 'none'; updateCounter(); }
+    });
+  } catch (err) { if (err.name !== 'NotAllowedError') toast('Screen share: ' + err.message); }
+};
+$('#btnPrev').onclick = prevSlide;
+$('#btnNext').onclick = nextSlide;
+out.onclick = nextSlide;
+
+// ---------- camera + mic ----------
+const camVideo = $('#camVideo');
+let camStream = null, micStream = null, audioCtx = null, analyser = null;
+
+async function startCam(deviceId) {
+  if (camStream) camStream.getTracks().forEach(t => t.stop());
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: deviceId ? { exact: deviceId } : undefined,
+               width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+    });
+    camVideo.srcObject = camStream; await camVideo.play();
+    const st = camStream.getVideoTracks()[0].getSettings();
+    $('#camInfo').textContent = `Camera running at ${st.width}×${st.height}, ${Math.round(st.frameRate || 30)} fps`;
+  } catch (err) { toast('Camera: ' + err.message); }
+}
+
+async function startMic(deviceId) {
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: deviceId ? { exact: deviceId } : undefined,
+               echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 },
+    });
+    audioCtx = audioCtx || new AudioContext();
+    analyser = audioCtx.createAnalyser(); analyser.fftSize = 512;
+    audioCtx.createMediaStreamSource(micStream).connect(analyser);
+  } catch (err) { toast('Microphone: ' + err.message); }
+}
+
+async function listDevices() {
+  const devs = await navigator.mediaDevices.enumerateDevices();
+  const fill = (sel, kind, stream) => {
+    const cur = stream?.getTracks()[0]?.getSettings().deviceId;
+    sel.innerHTML = '';
+    devs.filter(d => d.kind === kind).forEach((d, i) => {
+      const o = document.createElement('option');
+      o.value = d.deviceId; o.textContent = d.label || `${kind} ${i + 1}`;
+      if (d.deviceId === cur) o.selected = true;
+      sel.appendChild(o);
+    });
+  };
+  fill($('#camSel'), 'videoinput', camStream);
+  fill($('#micSel'), 'audioinput', micStream);
+}
+$('#camSel').onchange = e => startCam(e.target.value);
+$('#micSel').onchange = e => startMic(e.target.value);
+
+const meterBuf = new Uint8Array(512);
+setInterval(() => {
+  if (!analyser) return;
+  analyser.getByteTimeDomainData(meterBuf);
+  let peak = 0;
+  for (const v of meterBuf) peak = Math.max(peak, Math.abs(v - 128));
+  $('#meterFill').style.width = Math.min(100, peak / 128 * 140) + '%';
+}, 60);
+document.addEventListener('pointerdown', () => audioCtx?.state === 'suspended' && audioCtx.resume());
+
+// ---------- beauty filter (WebGL) ----------
+const glc = document.createElement('canvas');
+const gl = glc.getContext('webgl', { preserveDrawingBuffer: true, antialias: false, alpha: false });
+let glProg = null, glU = {};
+const MAX_PROC_W = 1280;
+
+const VERT = `attribute vec2 p; varying vec2 v_uv;
+void main(){ v_uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
+const FRAG = `precision highp float;
+varying vec2 v_uv;
+uniform sampler2D u_tex;
+uniform vec2 u_px;
+uniform sampler2D u_mask, u_bg;
+uniform float u_smooth, u_bright, u_warm, u_sat, u_sharp, u_skinOnly, u_step, u_blurOn;
+float luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
+void main(){
+  vec3 c = texture2D(u_tex, v_uv).rgb;
+  vec3 blur = c;
+  if (u_smooth > 0.001) {
+    // Edge-preserving (bilateral) blur: averages similar-coloured neighbours, so pores and blemishes
+    // fade but the outline of eyes, lips and jaw stays put.
+    float sr = 0.05 + 0.09 * u_smooth;
+    float inv = 1.0 / (2.0 * sr * sr);
+    vec3 acc = vec3(0.0); float wsum = 0.0;
+    for (int i = -3; i <= 3; i++) {
+      for (int j = -3; j <= 3; j++) {
+        vec2 o = vec2(float(i), float(j));
+        vec3 s = texture2D(u_tex, v_uv + o * u_px * u_step).rgb;
+        vec3 d = s - c;
+        float w = exp(-dot(o, o) / 10.0 - dot(d, d) * inv);
+        acc += s * w; wsum += w;
+      }
+    }
+    blur = acc / wsum;
+  }
+  // Skin mask (YCbCr skin-tone range) so smoothing stays on skin.
+  float cb = 0.5 - 0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b;
+  float cr = 0.5 + 0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b;
+  float skin = smoothstep(0.26, 0.31, cb) * (1.0 - smoothstep(0.50, 0.55, cb))
+             * smoothstep(0.50, 0.54, cr) * (1.0 - smoothstep(0.69, 0.74, cr))
+             * smoothstep(0.06, 0.18, luma(c));
+  float m = mix(1.0, skin, u_skinOnly);
+  vec3 col = mix(c, blur, clamp(u_smooth * m * 1.1, 0.0, 1.0));
+  col += (c - blur) * u_sharp * (1.0 - m) * 1.5;
+  if (u_blurOn > 0.5) {
+    // person mask from the segmentation model; soft edge so hair doesn't look cut out
+    float person = smoothstep(0.35, 0.75, texture2D(u_mask, v_uv).r);
+    col = mix(texture2D(u_bg, v_uv).rgb, col, person);
+  }
+  col = pow(max(col, 0.0), vec3(1.0 - u_bright * 0.4));
+  col += vec3(0.06, 0.015, -0.06) * u_warm;
+  col = mix(vec3(luma(col)), col, 1.0 + u_sat);
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}`;
+
+function initGL() {
+  if (!gl) return;
+  const sh = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  try {
+    glProg = gl.createProgram();
+    gl.attachShader(glProg, sh(gl.VERTEX_SHADER, VERT));
+    gl.attachShader(glProg, sh(gl.FRAGMENT_SHADER, FRAG));
+    gl.linkProgram(glProg); gl.useProgram(glProg);
+  } catch (err) { console.error(err); glProg = null; toast('Beauty filter unavailable on this GPU'); return; }
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(glProg, 'p');
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  // texture units: 0 = camera, 1 = person mask, 2 = blurred background
+  glTex = [0, 1, 2].map(i => {
+    const tex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + i);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    for (const [k, v] of [[gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE],
+                          [gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR]])
+      gl.texParameteri(gl.TEXTURE_2D, k, v);
+    return tex;
+  });
+  for (const n of ['u_px', 'u_smooth', 'u_bright', 'u_warm', 'u_sat', 'u_sharp', 'u_skinOnly', 'u_step', 'u_blurOn'])
+    glU[n] = gl.getUniformLocation(glProg, n);
+  gl.uniform1i(gl.getUniformLocation(glProg, 'u_tex'), 0);
+  gl.uniform1i(gl.getUniformLocation(glProg, 'u_mask'), 1);
+  gl.uniform1i(gl.getUniformLocation(glProg, 'u_bg'), 2);
+}
+let glTex = [];
+initGL();
+
+function processCam(video) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.min(1, MAX_PROC_W / vw);
+  const w = Math.round(vw * s), h = Math.round(vh * s);
+  if (glc.width !== w || glc.height !== h) { glc.width = w; glc.height = h; }
+  gl.viewport(0, 0, w, h);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+  const blurOn = S.cam.blur && segmenter && updateSegmentation(video);
+  if (blurOn) {
+    gl.activeTexture(gl.TEXTURE1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskC);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bgC);
+  }
+  const b = S.beauty.on ? S.beauty : { smooth: 0, bright: 0, warm: 0, sat: 0, sharp: 0, skinOnly: true };
+  gl.uniform1f(glU.u_blurOn, blurOn ? 1 : 0);
+  gl.uniform2f(glU.u_px, 1 / w, 1 / h);
+  gl.uniform1f(glU.u_smooth, b.smooth);
+  gl.uniform1f(glU.u_bright, b.bright);
+  gl.uniform1f(glU.u_warm, b.warm);
+  gl.uniform1f(glU.u_sat, b.sat);
+  gl.uniform1f(glU.u_sharp, b.sharp);
+  gl.uniform1f(glU.u_skinOnly, b.skinOnly ? 1 : 0);
+  gl.uniform1f(glU.u_step, 1 + b.smooth * 1.5);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  return glc;
+}
+
+// ---------- background blur (MediaPipe selfie segmentation, runs locally in the browser) ----------
+const MP = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite';
+const SEG_W = 256;   // the model works on a small copy; the mask is smoothly scaled up in the shader
+let segmenter = null, segLoading = false, maskImg = null, prevMask = null;
+const segIn = document.createElement('canvas'), segCtx = segIn.getContext('2d');
+const maskC = document.createElement('canvas'), maskCtx = maskC.getContext('2d');
+const bgC = document.createElement('canvas'), bgCtx = bgC.getContext('2d');
+
+async function ensureSegmenter() {
+  if (segmenter || segLoading || !glProg) return;
+  segLoading = true; toast('Loading background blur…');
+  try {
+    const { FilesetResolver, ImageSegmenter } = await import(`${MP}/vision_bundle.mjs`);
+    const files = await FilesetResolver.forVisionTasks(`${MP}/wasm`);
+    const opts = delegate => ({ baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+      runningMode: 'VIDEO', outputCategoryMask: false, outputConfidenceMasks: true });
+    try { segmenter = await ImageSegmenter.createFromOptions(files, opts('GPU')); }
+    catch { segmenter = await ImageSegmenter.createFromOptions(files, opts('CPU')); }
+    toast('Background blur ready');
+  } catch (err) {
+    toast('Background blur failed to load (needs internet the first time): ' + err.message);
+    S.cam.blur = false; save(); syncAll();
+  }
+  segLoading = false;
+}
+
+function updateSegmentation(video) {
+  const w = SEG_W, h = Math.round(SEG_W * video.videoHeight / video.videoWidth);
+  for (const c of [segIn, maskC, bgC]) {
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; maskImg = null; prevMask = null; }
+  }
+  segCtx.drawImage(video, 0, 0, w, h);
+  let ok = false;
+  try {
+    segmenter.segmentForVideo(segIn, performance.now(), res => {
+      const a = res.confidenceMasks?.[0]?.getAsFloat32Array();
+      if (!a || a.length !== w * h) return;
+      maskImg = maskImg || maskCtx.createImageData(w, h);
+      if (!prevMask) prevMask = Float32Array.from(a);
+      const d = maskImg.data;
+      for (let i = 0; i < a.length; i++) {
+        // blend with the previous frame so the edge doesn't flicker
+        const v = prevMask[i] = prevMask[i] * 0.4 + a[i] * 0.6;
+        d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v * 255; d[i * 4 + 3] = 255;
+      }
+      maskCtx.putImageData(maskImg, 0, 0);
+      ok = true;
+    });
+  } catch (err) { console.warn(err); }
+  if (!ok) return false;
+  // blurred background; drawn slightly oversized so the blur doesn't darken the edges
+  const r = 2 + S.cam.blurAmt * 10;
+  bgCtx.filter = `blur(${r}px)`;
+  bgCtx.drawImage(segIn, -r * 2, -r * 2, w + r * 4, h + r * 4);
+  bgCtx.filter = 'none';
+  return true;
+}
+
+// ---------- compositing ----------
+function drawFit(src, sw, sh) {
+  const sc = Math.min(W / sw, H / sh);
+  const dw = sw * sc, dh = sh * sc;
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, (W - dw) / 2, (H - dh) / 2, dw, dh);
+}
+
+function shapePath(x, y, w, h) {
+  ctx.beginPath();
+  if (S.cam.shape === 'circle') ctx.arc(x + w / 2, y + h / 2, w / 2, 0, Math.PI * 2);
+  else ctx.roundRect(x, y, w, h, Math.min(w, h) * 0.08);
+}
+
+function drawCam() {
+  const c = S.cam;
+  const src = (glProg && (S.beauty.on || S.cam.blur)) ? processCam(camVideo) : camVideo;
+  const vw = src === camVideo ? camVideo.videoWidth : src.width;
+  const vh = src === camVideo ? camVideo.videoHeight : src.height;
+  const bw = c.size * W;
+  const bh = c.shape === 'circle' ? bw : c.shape === 'wide' ? bw * 9 / 16 : bw * 3 / 4;
+  const m = c.margin * W;
+  const x = c.corner.includes('l') ? m : W - m - bw;
+  const y = c.corner.includes('t') ? m : H - m - bh;
+
+  // crop source to bubble aspect, apply zoom and pan
+  const aspect = bw / bh;
+  let cw = Math.min(vw, vh * aspect) / c.zoom, ch = cw / aspect;
+  const px = c.mirror ? -c.panX : c.panX;
+  const cx = (vw - cw) / 2 + px * (vw - cw) / 2;
+  const cy = (vh - ch) / 2 + c.panY * (vh - ch) / 2;
+
+  const k = W / 1920;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 24 * k; ctx.shadowOffsetY = 6 * k;
+  shapePath(x, y, bw, bh); ctx.fillStyle = '#000'; ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  shapePath(x, y, bw, bh); ctx.clip();
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  if (c.mirror) { ctx.translate(x + bw, y); ctx.scale(-1, 1); ctx.drawImage(src, cx, cy, cw, ch, 0, 0, bw, bh); }
+  else ctx.drawImage(src, cx, cy, cw, ch, x, y, bw, bh);
+  ctx.restore();
+
+  if (c.border > 0) {
+    ctx.save();
+    shapePath(x, y, bw, bh);
+    ctx.lineWidth = c.border * k; ctx.strokeStyle = c.borderColor; ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function draw() {
+  ctx.fillStyle = S.bg; ctx.fillRect(0, 0, W, H);
+  if (slides.mode === 'screen' && screenVideo.readyState >= 2) {
+    drawFit(screenVideo, screenVideo.videoWidth, screenVideo.videoHeight);
+  } else if (slides.img) {
+    drawFit(slides.img, slides.img.width, slides.img.height);
+  } else if (slides.mode === 'none') {
+    ctx.fillStyle = '#666'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `${Math.round(H / 30)}px system-ui, sans-serif`;
+    ctx.fillText('Open a PDF of your slides to begin →', W / 2, H / 2);
+  }
+  if (S.cam.on && camVideo.readyState >= 2 && camVideo.videoWidth) drawCam();
+}
+
+// Drive frames from a worker timer: unlike requestAnimationFrame it keeps running when you
+// switch to another window (e.g. PowerPoint while using "Share window"), so the recording never freezes.
+const FPS = 30;
+const ticker = new Worker(URL.createObjectURL(new Blob(
+  [`setInterval(() => postMessage(0), ${1000 / FPS});`], { type: 'text/javascript' })));
+ticker.onmessage = draw;
+
+// ---------- recording ----------
+let rec = null, chunks = [], recStartedAt = 0, recElapsed = 0, recTimer = null;
+
+function pickMime() {
+  const opts = ['video/mp4;codecs=avc1.640033,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4',
+                'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  return opts.find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+}
+function bitrate() {
+  const base = { standard: 8e6, high: 16e6, max: 30e6 }[S.quality];
+  return Math.min(100e6, Math.round(base * (W * H) / (1920 * 1080)));
+}
+function fmtTime(ms) {
+  const s = Math.floor(ms / 1000);
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+function updateFmtNote() {
+  const m = pickMime() || 'unsupported';
+  $('#fmtNote').textContent = `Saves as ${m.startsWith('video/mp4') ? 'MP4' : 'WebM'} · ${W}×${H} · ${FPS} fps · ${(bitrate() / 1e6).toFixed(0)} Mbps`;
+}
+
+async function countdown(n) {
+  const el = $('#countdown'); el.style.display = 'flex';
+  for (let i = n; i > 0; i--) { el.textContent = i; await new Promise(r => setTimeout(r, 1000)); }
+  el.style.display = 'none';
+}
+
+async function startRec() {
+  const mimeType = pickMime();
+  if (!mimeType) return toast('Recording is not supported in this browser. Use Chrome or Edge.');
+  if (!micStream) toast('No microphone. Recording video only.');
+  $('#btnRec').disabled = true;
+  await countdown(3);
+  const stream = out.captureStream(FPS);
+  micStream?.getAudioTracks().forEach(t => stream.addTrack(t));
+  chunks = [];
+  await RecStore.start(mimeType);
+  rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate(), audioBitsPerSecond: 192000 });
+  rec.ondataavailable = e => {
+    if (!e.data.size) return;
+    chunks.push(e.data);
+    RecStore.add(e.data);   // crash safety: every second of video is also kept in browser storage
+  };
+  rec.onstop = () => finishRec(mimeType);
+  rec.start(1000);
+  recStartedAt = performance.now(); recElapsed = 0;
+  recTimer = setInterval(updateRecBadge, 250);
+  document.querySelectorAll('[data-k="res"]').forEach(el => el.disabled = true);
+  $('#btnRec').disabled = false; $('#btnRec').textContent = '■ Stop recording';
+  $('#btnPause').disabled = false;
+  $('#recBadge').style.display = 'block'; updateRecBadge();
+}
+
+function stopRec() { if (rec && rec.state !== 'inactive') rec.stop(); }
+
+let resuming = false;
+async function togglePause() {
+  if (!rec || resuming) return;
+  if (rec.state === 'recording') {
+    rec.pause(); recElapsed += performance.now() - recStartedAt;
+    $('#btnPause').textContent = 'Resume';
+  } else if (rec.state === 'paused') {
+    resuming = true; updateRecBadge();
+    await countdown(3);
+    resuming = false;
+    if (!rec || rec.state !== 'paused') return;
+    rec.resume(); recStartedAt = performance.now();
+    $('#btnPause').textContent = 'Pause';
+  }
+  updateRecBadge();
+}
+
+function recTimeMs() {
+  return rec ? recElapsed + (rec.state === 'paused' ? 0 : performance.now() - recStartedAt) : 0;
+}
+
+function updateRecBadge() {
+  if (!rec) return;
+  const paused = rec.state === 'paused';
+  const t = recTimeMs();
+  const b = $('#recBadge');
+  b.classList.toggle('paused', paused);
+  b.textContent = `${paused ? '❚❚ PAUSED' : '● REC'} ${fmtTime(t)}`;
+  $('#pausedOverlay').style.display = paused && !resuming ? 'flex' : 'none';
+}
+
+function finishRec(mimeType) {
+  clearInterval(recTimer);
+  const blob = new Blob(chunks, { type: mimeType.split(';')[0] });
+  const ext = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
+  const d = new Date(), pad = n => String(n).padStart(2, '0');
+  const name = `presentation-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.${ext}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name;
+  a.textContent = `⬇ ${name} (${(blob.size / 1048576).toFixed(1)} MB)`;
+  $('#recordings').prepend(a);
+  a.click();
+  rec = null; chunks = [];
+  document.querySelectorAll('[data-k="res"]').forEach(el => el.disabled = false);
+  $('#btnRec').textContent = '● Start recording';
+  $('#btnPause').disabled = true; $('#btnPause').textContent = 'Pause';
+  $('#recBadge').style.display = 'none';
+  $('#pausedOverlay').style.display = 'none';
+  RecStore.clear();
+  toast('Saved ' + name + '. Check your Downloads folder.');
+}
+
+// ---------- crash recovery: recording chunks mirrored to IndexedDB ----------
+const RecStore = (() => {
+  let dbp = null;
+  const db = () => dbp ??= new Promise((res, rej) => {
+    const r = indexedDB.open('presenter-studio', 1);
+    r.onupgradeneeded = () => { r.result.createObjectStore('chunks', { autoIncrement: true }); r.result.createObjectStore('meta'); };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  const run = async (mode, fn) => {
+    const d = await db();
+    return new Promise((res, rej) => {
+      const t = d.transaction(['chunks', 'meta'], mode);
+      fn(t); t.oncomplete = () => res(); t.onerror = t.onabort = () => rej(t.error);
+    });
+  };
+  const quiet = p => p.catch(err => console.warn('recording backup:', err));
+  return {
+    start: mime => quiet(run('readwrite', t => {
+      t.objectStore('chunks').clear();
+      t.objectStore('meta').put({ mime, started: Date.now() }, 'current');
+    })),
+    add: blob => quiet(run('readwrite', t => t.objectStore('chunks').add(blob))),
+    clear: () => quiet(run('readwrite', t => { t.objectStore('chunks').clear(); t.objectStore('meta').delete('current'); })),
+    async load() {
+      let meta, blobs;
+      await run('readonly', t => {
+        const m = t.objectStore('meta').get('current'), c = t.objectStore('chunks').getAll();
+        m.onsuccess = () => meta = m.result; c.onsuccess = () => blobs = c.result;
+      });
+      return meta && blobs?.length ? { meta, blobs } : null;
+    },
+  };
+})();
+
+async function checkRecovery() {
+  let found = null;
+  try { found = await RecStore.load(); } catch {}
+  if (!found || rec) return;
+  const size = found.blobs.reduce((s, b) => s + b.size, 0);
+  $('#recoverInfo').innerHTML = `<b>Unfinished recording found</b><br>Started ${new Date(found.meta.started).toLocaleString()}, ` +
+    `${(size / 1048576).toFixed(0)} MB. The browser was probably closed before you pressed Stop.`;
+  $('#recoverBox').hidden = false;
+  $('#btnRecover').onclick = () => {
+    const ext = found.meta.mime.startsWith('video/mp4') ? 'mp4' : 'webm';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(found.blobs, { type: found.meta.mime.split(';')[0] }));
+    a.download = `presentation-recovered-${found.meta.started}.${ext}`; a.click();
+    $('#recoverBox').hidden = true; RecStore.clear();
+    toast('Recovered recording saved to Downloads');
+  };
+  $('#btnDiscard').onclick = () => {
+    if (!confirm('Delete the unfinished recording? This cannot be undone.')) return;
+    $('#recoverBox').hidden = true; RecStore.clear();
+  };
+}
+
+$('#btnRec').onclick = () => rec ? stopRec() : startRec();
+$('#btnPause').onclick = togglePause;
+window.addEventListener('beforeunload', e => { if (rec) { e.preventDefault(); e.returnValue = ''; } });
+
+// ---------- controls ----------
+function showVal(el) {
+  const o = el.parentElement.querySelector('output');
+  if (!o) return;
+  const v = parseFloat(el.value);
+  o.textContent = el.dataset.k === 'cam.border' ? v + 'px' : el.dataset.k === 'cam.zoom' ? v.toFixed(2) + '×' : Math.round(v * 100);
+}
+function syncAll() {
+  document.querySelectorAll('[data-k]').forEach(el => {
+    const v = getK(el.dataset.k);
+    if (el.type === 'checkbox') el.checked = v; else el.value = v;
+    showVal(el);
+  });
+  document.querySelectorAll('[data-corner]').forEach(b => b.classList.toggle('active', b.dataset.corner === S.cam.corner));
+}
+document.querySelectorAll('[data-k]').forEach(el => {
+  el.addEventListener('input', () => {
+    const k = el.dataset.k;
+    let v = el.type === 'checkbox' ? el.checked : el.type === 'range' ? parseFloat(el.value) : el.value;
+    if (k === 'res') v = parseInt(v, 10);
+    setK(k, v); showVal(el); save();
+    if (k === 'res') applyRes();
+    if (k === 'cam.blur' && v) ensureSegmenter();
+    if (k === 'res' || k === 'quality') updateFmtNote();
+  });
+});
+document.querySelectorAll('[data-corner]').forEach(b => b.onclick = () => {
+  S.cam.corner = b.dataset.corner; save(); syncAll();
+});
+document.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => {
+  Object.assign(S.beauty, PRESETS[b.dataset.preset]); save(); syncAll();
+});
+
+document.addEventListener('keydown', e => {
+  if (!$('#scriptModal').hidden) { if (e.key === 'Escape') closeScriptModal(); return; }
+  if (e.target.matches('input, select, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key;
+  if (['ArrowRight', 'ArrowDown', 'PageDown', ' ', 'Enter'].includes(k)) { e.preventDefault(); nextSlide(); }
+  else if (['ArrowLeft', 'ArrowUp', 'PageUp', 'Backspace'].includes(k)) { e.preventDefault(); prevSlide(); }
+  else if (k === 'Home') showPage(1);
+  else if (k === 'End') showPage(slides.count);
+  else if (k === 'r' || k === 'R') rec ? stopRec() : startRec();
+  else if (k === 'p' || k === 'P') togglePause();
+  else if (k === 'c' || k === 'C') { S.cam.on = !S.cam.on; save(); syncAll(); }
+  else if (k === 'b' || k === 'B') { S.cam.blur = !S.cam.blur; save(); syncAll(); if (S.cam.blur) ensureSegmenter(); }
+  else if (k === 'h' || k === 'H') document.body.classList.toggle('hide-panel');
+  else if (k === 'n' || k === 'N') toggleFloat();
+  else if (k === 'v' || k === 'V') togglePresenter();
+  else if (k === '+' || k === '=') notesFont(2);
+  else if (k === '-' || k === '_') notesFont(-2);
+});
+
+// ---------- speaker notes ----------
+// Notes live in page elements outside the canvas, so they are never part of the recording.
+const pane = $('#notesPane');
+const notes = { key: 'untitled', list: [] };
+let editing = false;
+
+const docKey = name => name.replace(/\.[^.]+$/, '').trim().toLowerCase();
+function loadNotes(key) {
+  notes.key = key;
+  try { notes.list = JSON.parse(localStorage.getItem('presenter-studio-notes:' + key)) || []; }
+  catch { notes.list = []; }
+  renderNotes();
+}
+function saveNotes(key = notes.key, list = notes.list) {
+  try { localStorage.setItem('presenter-studio-notes:' + key, JSON.stringify(list)); } catch {}
+}
+
+function renderNotes() {
+  const txt = notes.list[slides.page - 1] || '';
+  const el = $('#notesText');
+  el.textContent = txt || 'No notes for this slide. Click ✎ to add some.';
+  el.classList.toggle('empty', !txt);
+  const ta = $('#notesEdit');
+  if (editing && ta.value !== txt) ta.value = txt;
+  $('#notesTitle').textContent = `Notes · Slide ${slides.page}${slides.count ? ' / ' + slides.count : ''}`;
+}
+
+function setEditing(on) {
+  editing = on;
+  pane.classList.toggle('editing', on);
+  $('#notesEditBtn').classList.toggle('active', on);
+  renderNotes();
+  if (on) $('#notesEdit').focus(); else $('#notesEdit').blur();
+}
+$('#notesEdit').addEventListener('input', e => {
+  notes.list[slides.page - 1] = e.target.value; saveNotes();
+});
+$('#notesEdit').addEventListener('keydown', e => { if (e.key === 'Escape') setEditing(false); });
+$('#notesEditBtn').onclick = () => setEditing(!editing);
+$('#notesPrev').onclick = prevSlide;
+$('#notesNext').onclick = nextSlide;
+$('#notesSmaller').onclick = () => notesFont(-2);
+$('#notesBigger').onclick = () => notesFont(2);
+$('#notesClose').onclick = () => { if (S.view === 'presenter') togglePresenter(); else toggleFloat(); };
+
+function notesFont(d) {
+  S.notes.size = Math.max(12, Math.min(80, S.notes.size + d)); save(); applyView();
+}
+function toggleFloat() {
+  if (S.view === 'presenter') { S.view = 'normal'; S.notes.float = true; }
+  else S.notes.float = !S.notes.float;
+  save(); applyView();
+}
+function togglePresenter() {
+  S.view = S.view === 'presenter' ? 'normal' : 'presenter'; save(); applyView();
+}
+const isFloating = () => S.notes.float && S.view !== 'presenter';
+
+function applyView() {
+  document.body.classList.toggle('presenter', S.view === 'presenter');
+  document.body.classList.toggle('float-notes', isFloating());
+  pane.style.setProperty('--notes-size', S.notes.size + 'px');
+  if (isFloating()) {
+    // keep the box on screen if the window got smaller since last time
+    const st = $('#stage');
+    S.notes.x = Math.max(0, Math.min(S.notes.x, st.clientWidth - 120));
+    S.notes.y = Math.max(0, Math.min(S.notes.y, st.clientHeight - 60));
+    Object.assign(pane.style, { left: S.notes.x + 'px', top: S.notes.y + 'px',
+                                width: S.notes.w + 'px', height: S.notes.h + 'px' });
+  }
+  $('#btnFloat').classList.toggle('active', isFloating());
+  $('#btnPresenter').classList.toggle('active', S.view === 'presenter');
+  renderNext();
+}
+$('#btnFloat').onclick = toggleFloat;
+$('#btnPresenter').onclick = togglePresenter;
+
+// drag the floating box by its header
+$('#notesHead').addEventListener('pointerdown', e => {
+  if (!isFloating() || e.target.closest('button')) return;
+  const dx = e.clientX - pane.offsetLeft, dy = e.clientY - pane.offsetTop;
+  const move = ev => {
+    S.notes.x = Math.max(0, ev.clientX - dx); S.notes.y = Math.max(0, ev.clientY - dy);
+    pane.style.left = S.notes.x + 'px'; pane.style.top = S.notes.y + 'px';
+  };
+  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); save(); };
+  addEventListener('pointermove', move); addEventListener('pointerup', up);
+});
+new ResizeObserver(() => {
+  if (!isFloating() || !pane.offsetWidth) return;
+  S.notes.w = pane.offsetWidth; S.notes.h = pane.offsetHeight; save();
+}).observe(pane);
+
+// next-slide preview + clock for presenter view
+const nextC = $('#nextCanvas'), nctx = nextC.getContext('2d');
+async function renderNext() {
+  if (S.view !== 'presenter') return;
+  const n = slides.page + 1;
+  let img = null;
+  try {
+    if (slides.mode === 'pdf' && n <= slides.count) img = await renderPage(n);
+    else if (slides.mode === 'images') img = slides.images[n - 1] || null;
+  } catch {}
+  if (slides.page + 1 !== n) return;
+  nctx.fillStyle = '#000'; nctx.fillRect(0, 0, nextC.width, nextC.height);
+  if (img) {
+    const sc = Math.min(nextC.width / img.width, nextC.height / img.height);
+    const w = img.width * sc, h = img.height * sc;
+    nctx.imageSmoothingQuality = 'high';
+    nctx.drawImage(img, (nextC.width - w) / 2, (nextC.height - h) / 2, w, h);
+  } else {
+    nctx.fillStyle = '#666'; nctx.font = '24px system-ui, sans-serif';
+    nctx.textAlign = 'center'; nctx.textBaseline = 'middle';
+    nctx.fillText(slides.mode === 'screen' ? '(controlled in PowerPoint)' : 'End of slides', nextC.width / 2, nextC.height / 2);
+  }
+}
+setInterval(() => {
+  if (S.view !== 'presenter') return;
+  const c = $('#clock');
+  if (rec) {
+    c.textContent = (rec.state === 'paused' ? '❚❚ ' : '● ') + fmtTime(recTimeMs());
+    c.style.color = 'var(--rec)';
+  } else {
+    c.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    c.style.color = '';
+  }
+}, 250);
+
+// ---------- notes backup (browser storage can be wiped by clearing site data) ----------
+const NOTES_PREFIX = 'presenter-studio-notes:';
+$('#btnNotesBackup').onclick = () => {
+  const all = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith(NOTES_PREFIX)) all[k.slice(NOTES_PREFIX.length)] = JSON.parse(localStorage.getItem(k));
+    }
+  } catch {}
+  const blob = new Blob([JSON.stringify({ app: 'presenter-studio', notes: all }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'presenter-notes-backup.json'; a.click();
+  toast(`Backed up notes for ${Object.keys(all).length} presentation(s)`);
+};
+$('#btnNotesRestore').onclick = () => $('#fileNotesJson').click();
+$('#fileNotesJson').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  e.target.value = '';
+  try {
+    const data = JSON.parse(await f.text());
+    const entries = Object.entries(data.notes || {});
+    for (const [k, list] of entries) saveNotes(k, list);
+    loadNotes(notes.key);
+    toast(`Restored notes for ${entries.length} presentation(s)`);
+  } catch (err) { toast('Not a valid notes backup: ' + err.message); }
+};
+
+// ---------- import speaker notes from a written script ----------
+// A new section starts at any line like "Slide 3: Title (cue)". If slide numbers start over,
+// the text holds more than one version of the script and the user picks which one to use.
+function parseScript(text) {
+  const heading = /^(?:#+\s*)?Slide\s+(\d+)\b\s*[:.\-–—]?\s*(.*)$/i;
+  const cueAtEnd = /\(([^()]*)\)\s*$/;
+  const versions = [];
+  let cur = null, sec = null;
+  for (const raw of text.replace(/\r/g, '').split('\n')) {
+    const line = raw.replace(/\*\*|__/g, '').trim();
+    const h = line.match(heading);
+    if (h) {
+      const n = parseInt(h[1], 10);
+      if (!cur || n <= cur.lastN) { cur = { slides: {}, lastN: 0 }; versions.push(cur); }
+      cur.lastN = n;
+      const cue = h[2].match(cueAtEnd);
+      sec = cur.slides[n] = { cue: cue ? cue[1].trim() : '', body: [] };
+      continue;
+    }
+    // "About 1,460 words…" lines are script metadata, not something to say
+    if (/^about\s+[\d,]+\s+words\b/i.test(line)) { sec = null; continue; }
+    if (sec) sec.body.push(line);
+  }
+  return versions.map(v => {
+    const notes = {}; let words = 0;
+    for (const [n, s] of Object.entries(v.slides)) {
+      const body = s.body.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+      words += body.split(/\s+/).filter(Boolean).length;
+      notes[n] = (s.cue ? `(${s.cue})\n\n` : '') + body;
+    }
+    const firstBody = (v.slides[Math.min(...Object.keys(v.slides).map(Number))]?.body.join(' ') || '').replace(/\s+/g, ' ').trim();
+    return { notes, words, count: Object.keys(notes).length, preview: firstBody.slice(0, 110) };
+  });
+}
+
+let parsedVersions = [];
+function openScriptModal() {
+  $('#scriptModal').hidden = false;
+  $('#scriptTarget').textContent = slides.mode === 'none'
+    ? 'Tip: open your slides PDF first, so the notes are saved with that presentation.'
+    : `Notes will be added to the presentation that is open now (${slides.count || '?'} slides). ` +
+      'Slides that are not in the script keep their current notes.';
+  updateScriptPreview();
+  $('#scriptText').focus();
+}
+function closeScriptModal() { $('#scriptModal').hidden = true; }
+
+function updateScriptPreview() {
+  parsedVersions = parseScript($('#scriptText').value);
+  const box = $('#scriptVersions');
+  box.innerHTML = '';
+  if (!$('#scriptText').value.trim()) { $('#scriptImport').disabled = true; return; }
+  if (!parsedVersions.length) {
+    box.innerHTML = '<p class="note">No "Slide 1:", "Slide 2:" … headings found yet.</p>';
+    $('#scriptImport').disabled = true; return;
+  }
+  if (parsedVersions.length > 1) {
+    box.insertAdjacentHTML('beforeend', `<p class="note">This text contains <b>${parsedVersions.length} versions</b> of the script. Pick one:</p>`);
+  }
+  parsedVersions.forEach((v, i) => {
+    const label = document.createElement('label');
+    label.innerHTML = `<input type="radio" name="scriptVer" value="${i}" ${i === 0 ? 'checked' : ''}> ` +
+      `<b>${parsedVersions.length > 1 ? `Version ${i + 1}: ` : ''}${v.count} slides, about ${v.words.toLocaleString()} words</b>` +
+      ` (≈${Math.round(v.words / 130)} min at 130 words/min)<span class="preview"></span>`;
+    label.querySelector('.preview').textContent = `“${v.preview}…”`;
+    box.appendChild(label);
+  });
+  $('#scriptImport').disabled = false;
+}
+
+$('#btnScript').onclick = openScriptModal;
+$('#scriptCancel').onclick = closeScriptModal;
+$('#scriptText').addEventListener('input', updateScriptPreview);
+$('#scriptFileBtn').onclick = () => $('#fileScript').click();
+$('#fileScript').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  e.target.value = '';
+  $('#scriptText').value = await f.text();
+  updateScriptPreview();
+};
+$('#scriptImport').onclick = () => {
+  const i = parseInt(document.querySelector('input[name="scriptVer"]:checked')?.value || '0', 10);
+  const v = parsedVersions[i];
+  if (!v) return;
+  for (const [n, text] of Object.entries(v.notes)) notes.list[n - 1] = text;
+  for (let k = 0; k < notes.list.length; k++) if (notes.list[k] === undefined) notes.list[k] = '';
+  saveNotes(); renderNotes();
+  closeScriptModal();
+  if (!isFloating() && S.view !== 'presenter') toggleFloat();
+  let msg = `Imported notes for ${v.count} slides`;
+  if (slides.count && v.count > slides.count) msg += `. The script has more slides than the PDF (${slides.count})`;
+  toast(msg, 6000);
+};
+
+// ---------- import speaker notes from .pptx ----------
+function resolvePath(dir, target) {
+  if (target.startsWith('/')) return target.slice(1);
+  const parts = dir.split('/');
+  for (const seg of target.split('/')) {
+    if (seg === '..') parts.pop(); else if (seg && seg !== '.') parts.push(seg);
+  }
+  return parts.join('/');
+}
+async function readPptxNotes(file) {
+  const zip = await JSZip.loadAsync(file);
+  const xml = async p => {
+    const f = zip.file(p);
+    return f ? new DOMParser().parseFromString(await f.async('string'), 'application/xml') : null;
+  };
+  const rels = doc => Object.fromEntries(Array.from(doc?.getElementsByTagName('Relationship') || [])
+    .map(r => [r.getAttribute('Id'), { target: r.getAttribute('Target'), type: r.getAttribute('Type') }]));
+
+  const pres = await xml('ppt/presentation.xml');
+  const presRels = rels(await xml('ppt/_rels/presentation.xml.rels'));
+  const list = []; let hidden = 0;
+  for (const sld of Array.from(pres.getElementsByTagNameNS('*', 'sldId'))) {
+    const slidePath = resolvePath('ppt', presRels[sld.getAttribute('r:id')].target);
+    const slideDoc = await xml(slidePath);
+    // hidden slides are left out of PDF exports by default, so skip them to keep numbering aligned
+    if (slideDoc?.documentElement.getAttribute('show') === '0') { hidden++; continue; }
+    const dir = slidePath.slice(0, slidePath.lastIndexOf('/'));
+    const base = slidePath.slice(slidePath.lastIndexOf('/') + 1);
+    const notesRel = Object.values(rels(await xml(`${dir}/_rels/${base}.rels`))).find(r => r.type.endsWith('/notesSlide'));
+    let text = '';
+    if (notesRel) {
+      const nd = await xml(resolvePath(dir, notesRel.target));
+      for (const sp of Array.from(nd?.getElementsByTagNameNS('*', 'sp') || [])) {
+        const ph = sp.getElementsByTagNameNS('*', 'ph')[0];
+        if (ph?.getAttribute('type') !== 'body') continue;
+        text = Array.from(sp.getElementsByTagNameNS('*', 'p'))
+          .map(p => Array.from(p.getElementsByTagNameNS('*', 't')).map(t => t.textContent).join(''))
+          .join('\n').trim();
+      }
+    }
+    list.push(text);
+  }
+  return { list, hidden };
+}
+$('#btnPptx').onclick = () => $('#filePptx').click();
+$('#filePptx').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  e.target.value = '';
+  if (!window.JSZip) return toast('Could not load the .pptx reader. Check your internet connection and reload.');
+  try {
+    const { list, hidden } = await readPptxNotes(f);
+    saveNotes(docKey(f.name), list);      // ready for when the matching PDF is opened
+    notes.list = list; saveNotes();       // and for whatever is open now
+    renderNotes();
+    if (!isFloating() && S.view !== 'presenter') toggleFloat();
+    let msg = `Imported notes for ${list.filter(Boolean).length} of ${list.length} slides`;
+    if (hidden) msg += ` (skipped ${hidden} hidden)`;
+    if (slides.count && slides.count !== list.length) msg += `. Your PDF has ${slides.count} pages, so the notes may be out of step`;
+    toast(msg, 7000);
+  } catch (err) { toast('Could not read .pptx: ' + err.message); }
+};
+// stop buttons keeping focus, so Space/Enter go to slide navigation
+document.querySelectorAll('button').forEach(b => b.addEventListener('mouseup', () => b.blur()));
+
+// ---------- boot ----------
+applyRes();
+syncAll();
+updateFmtNote();
+updateCounter();
+loadNotes('untitled');
+applyView();
+if (S.cam.blur) ensureSegmenter();
+checkRecovery();
+if (!navigator.mediaDevices?.getUserMedia) {
+  toast('Camera access needs Chrome or Edge, opened via http://localhost (see instructions).', 10000);
+} else {
+  (async () => { await startCam(); await startMic(); await listDevices(); })();
+  navigator.mediaDevices.addEventListener('devicechange', listDevices);
+}
+})();
+</script>
+</body>
+</html>
