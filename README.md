@@ -8,6 +8,7 @@ Record a presentation with your slides and your face in one video, in the browse
 - **High resolution:** 1080p, 1440p or 4K at 30 fps, saved as MP4 (or WebM in browsers without MP4 recording)
 - **Speaker notes that are never recorded:** a floating notes box, or presenter view (small slide preview, next slide, timer, big notes)
 - **Import notes** from a written script (`Slide 1: …` headings) or from a PowerPoint `.pptx`
+- **Timer that is never recorded:** total time against your target length (e.g. 9–11 min) and time on the current slide against cues like "(About 45 seconds.)" in your notes, plus a practice mode
 - **Pause / resume** inside one recording, with a 3-second countdown before resuming
 - **Crash recovery:** if the browser closes mid-recording, you can save what was recorded the next time you open the app
 
@@ -61,6 +62,7 @@ Markdown bold (`**Slide 1: …**`) is fine. The bracketed part at the end of a h
 | `P` | Pause / resume |
 | `C` | Show / hide camera |
 | `B` | Background blur on / off |
+| `T` | Start / pause practice timer |
 | `N` | Floating notes |
 | `V` | Presenter view |
 | `+` / `−` | Notes text size |
