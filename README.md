@@ -9,8 +9,8 @@ Record a presentation with your slides and your face in one video, in the browse
 - **Speaker notes that are never recorded:** a floating notes box, or presenter view (small slide preview, next slide, timer, big notes)
 - **Import notes** from a written script (`Slide 1: …` headings) or from a PowerPoint `.pptx`
 - **Timer that is never recorded:** total time against your target length (e.g. 9–11 min) and time on the current slide against cues like "(About 45 seconds.)" in your notes, plus a practice mode
-- **Pause / resume** inside one recording, with a 3-second countdown before resuming
-- **Crash recovery:** if the browser closes mid-recording, you can save what was recorded the next time you open the app
+- **Redo a slide:** each slide is recorded as its own take. Made a mistake on slide 6? Press `Z` and only slide 6 is recorded again. A timeline shows every take, and you can delete and re-record any of them, even earlier ones.
+- **Pause and continue later:** takes are saved in the browser as you record, so you can pause, close the browser, and continue another day. **Save video** joins the takes into one MP4.
 
 Everything happens on your own computer. Slides, video and notes are never uploaded anywhere.
 
@@ -36,7 +36,11 @@ On a **Mac**, the first time you use it, allow Chrome to use the camera and micr
 2. Click **Open PDF**.
 3. Add notes: **Import script (text)**, **Import from .pptx**, or click ✎ on the notes box and type.
 4. Set up the camera bubble, beauty filter and blur, then press **R**. After a 3-2-1 countdown it's recording.
-5. Press **P** to pause and **P** again to resume. Press **R** to stop, and the video downloads automatically.
+5. Present as normal. Each slide becomes a separate take.
+   - Mistake? Press **Z** to throw away this slide's take and record the slide again (3-2-1 countdown).
+   - Tired? Press **R** to pause, and **R** again to continue. You can even close the browser and come back later.
+   - To redo an earlier slide, pause, then click **✕** on its take in the timeline and press **R**. The new take goes back in the same place.
+6. Click **Save video** to download the finished MP4. Your takes are kept, so you can still fix a slide and save again. **New recording…** clears them.
 
 ### Script format for import
 
@@ -58,8 +62,8 @@ Markdown bold (`**Slide 1: …**`) is fine. The bracketed part at the end of a h
 | --- | --- |
 | `→` `Space` `Page Down` | Next slide (clickers work too) |
 | `←` `Page Up` | Previous slide |
-| `R` | Start / stop recording |
-| `P` | Pause / resume |
+| `R` | Start recording / pause / resume |
+| `Z` | Redo this slide |
 | `C` | Show / hide camera |
 | `B` | Background blur on / off |
 | `T` | Start / pause practice timer |
@@ -72,4 +76,5 @@ Markdown bold (`**Slide 1: …**`) is fine. The bracketed part at the end of a h
 
 - Notes and settings are saved in the browser for the address you use (for example `localhost:8000` and the GitHub Pages site each keep their own). Use **Back up all notes** to move them to another browser or computer.
 - Keep the tab open while recording. Switching to other windows is fine.
+- Recording needs a recent Chrome or Edge (it uses WebCodecs to encode each take). Takes are stored in the browser for the address you use, until you click **New recording…**.
 - 10 minutes at 1080p "High" is about 1.2 GB. Use "Standard" for smaller files.

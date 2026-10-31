@@ -6,6 +6,7 @@
 <title>Presenter Studio</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.1/build/mp4-muxer.js"></script>
 <style>
   :root {
     --bg: #0e0f12; --panel: #17191e; --line: #2a2d35; --text: #e8e9ec; --muted: #9096a3;
@@ -81,6 +82,15 @@
     border-radius: 8px; cursor: pointer; }
   #scriptVersions label:has(input:checked) { border-color: var(--accent); }
   #scriptVersions .preview { display: block; color: var(--muted); margin-top: 3px; font-size: 12px; }
+  .takes-head { display: flex; justify-content: space-between; margin: 12px 0 6px; }
+  .takes-head span { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #takesList { display: flex; flex-wrap: wrap; gap: 4px; }
+  .take { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .take button { border: 0; border-radius: 0; padding: 3px 7px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .take .take-del { color: var(--muted); border-left: 1px solid var(--line); }
+  .take .take-del:hover { color: var(--rec); }
+  .take-here { align-self: center; padding: 3px 4px; font-size: 12px; color: var(--accent); }
+  #btnToEnd { width: 100%; margin-top: 6px; }
   #notesPane.editing #notesText { display: none; }
   #notesPane.editing #notesEdit { display: block; }
 
@@ -131,7 +141,7 @@
         <canvas id="out" width="1920" height="1080" title="Click: next slide"></canvas>
         <div id="counter">No slides</div>
         <div id="recBadge">● REC 00:00</div>
-        <div id="pausedOverlay">❚❚ Paused<small>Change slides if you like, then press P to resume (3-second countdown)</small></div>
+        <div id="pausedOverlay">❚❚ Paused<small>R to continue · Z to redo this slide · change slides freely while paused</small></div>
         <div id="countdown"></div>
       </div>
       <div id="timerBar">
@@ -260,22 +270,27 @@
     <div class="row"><label>Mic level</label><div id="meter"><div id="meterFill"></div></div></div>
     <div class="btns" style="margin-top:12px">
       <button id="btnRec" class="rec">● Start recording</button>
-      <button id="btnPause" disabled>Pause</button>
+      <button id="btnRedo" disabled title="Delete this slide's take and record it again (Z)">↺ Redo slide</button>
+    </div>
+    <div class="btns" style="margin-top:6px">
+      <button id="btnSave" disabled>⬇ Save video</button>
+      <button id="btnNew" disabled>New recording…</button>
     </div>
     <p class="note" id="fmtNote"></p>
-    <div id="recoverBox" class="notice" hidden>
-      <div id="recoverInfo"></div>
-      <div class="btns" style="margin-top:8px">
-        <button id="btnRecover" class="primary">Save it</button>
-        <button id="btnDiscard">Discard</button>
-      </div>
+    <p class="note" id="saveStatus"></p>
+    <div id="takesBox" hidden>
+      <div class="takes-head"><b>Takes</b><span id="takesTotal"></span></div>
+      <div id="takesList"></div>
+      <button id="btnToEnd" hidden>Continue at the end instead</button>
+      <p class="note">Each slide is its own take, saved in this browser as you go. You can close the browser and continue later.
+        <b>Save video</b> joins the takes into one MP4. Click a take to jump to its slide, or ✕ to delete it.</p>
     </div>
     <div id="recordings"></div>
 
     <h2>Shortcuts</h2>
     <p class="note">
       <kbd>→</kbd> <kbd>Space</kbd> <kbd>PgDn</kbd> next · <kbd>←</kbd> <kbd>PgUp</kbd> previous<br>
-      <kbd>R</kbd> start/stop recording · <kbd>P</kbd> pause · <kbd>C</kbd> camera · <kbd>H</kbd> hide this panel<br>
+      <kbd>R</kbd> record / pause / resume · <kbd>Z</kbd> redo this slide · <kbd>C</kbd> camera · <kbd>H</kbd> hide this panel<br>
       <kbd>T</kbd> practice timer · <kbd>N</kbd> floating notes · <kbd>V</kbd> presenter view · <kbd>+</kbd> <kbd>−</kbd> notes text size · <kbd>Esc</kbd> finish editing<br>
       Presentation clickers work too. Keep this tab open while recording.
     </p>
@@ -406,7 +421,7 @@ function showPage(n) {
     // screen share / no slides: arrows only step through the notes
     slides.page = Math.max(1, n);
   }
-  if (slides.page !== prevPage) timer.slideStart = timerNow();
+  if (slides.page !== prevPage) { timer.slideStart = timerNow(); onSlideChanged(); }
   updateCounter();
   renderNotes();
   renderNext();
@@ -774,6 +789,7 @@ function draw() {
     ctx.fillText('Open a PDF of your slides to begin →', W / 2, H / 2);
   }
   if (S.cam.on && camVideo.readyState >= 2 && camVideo.videoWidth) drawCam();
+  if (rec?.live) captureFrame();
 }
 
 // Drive frames from a worker timer: unlike requestAnimationFrame it keeps running when you
@@ -783,14 +799,19 @@ const ticker = new Worker(URL.createObjectURL(new Blob(
   [`setInterval(() => postMessage(0), ${1000 / FPS});`], { type: 'text/javascript' })));
 ticker.onmessage = draw;
 
-// ---------- recording ----------
-let rec = null, chunks = [], recStartedAt = 0, recElapsed = 0, recTimer = null;
+// ---------- recording: per-slide takes ----------
+// Each stretch of recording on one slide is a "take". Takes are encoded with WebCodecs and written
+// to IndexedDB while recording, so a slide can be redone, any take deleted, and a session continued
+// after the browser is closed. "Save video" joins the takes, in order, into one MP4.
+const CAN_RECORD = 'VideoEncoder' in window && 'VideoFrame' in window && !!window.Mp4Muxer;
+const CAN_RECORD_AUDIO = 'AudioEncoder' in window && 'MediaStreamTrackProcessor' in window;
+let rec = null;    // session: { id, created, res, W, H, bitrate, video, audio, takes, insertAt, encs, state, live }
+let busy = false;  // countdown or saving in progress
+// encoders and audio reader for this page; `recent` holds this page's takes so encoder output can be matched to them
+const R = { venc: null, aenc: null, encId: null, recent: [], reader: null, track: null, aOffset: null, aCalib: 0, rateWarned: false };
+const pending = new Map();   // take id -> encoded chunks not yet written to IndexedDB
 
-function pickMime() {
-  const opts = ['video/mp4;codecs=avc1.640033,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4',
-                'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
-  return opts.find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
-}
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 function bitrate() {
   const base = { standard: 8e6, high: 16e6, max: 30e6 }[S.quality];
   return Math.min(100e6, Math.round(base * (W * H) / (1920 * 1080)));
@@ -800,9 +821,11 @@ function fmtTime(ms) {
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 function updateFmtNote() {
-  const m = pickMime() || 'unsupported';
-  $('#fmtNote').textContent = `Saves as ${m.startsWith('video/mp4') ? 'MP4' : 'WebM'} · ${W}×${H} · ${FPS} fps · ${(bitrate() / 1e6).toFixed(0)} Mbps`;
+  $('#fmtNote').textContent = CAN_RECORD
+    ? `Saves as MP4 · ${W}×${H} · ${FPS} fps · ${(bitrate() / 1e6).toFixed(0)} Mbps`
+    : 'Recording needs a recent version of Chrome or Edge.';
 }
+const setStatus = text => $('#saveStatus').textContent = text;
 
 async function countdown(n) {
   const el = $('#countdown'); el.style.display = 'flex';
@@ -810,150 +833,541 @@ async function countdown(n) {
   el.style.display = 'none';
 }
 
-async function startRec() {
-  const mimeType = pickMime();
-  if (!mimeType) return toast('Recording is not supported in this browser. Use Chrome or Edge.');
-  if (!micStream) toast('No microphone. Recording video only.');
-  $('#btnRec').disabled = true;
-  await countdown(3);
-  const stream = out.captureStream(FPS);
-  micStream?.getAudioTracks().forEach(t => stream.addTrack(t));
-  chunks = [];
-  await RecStore.start(mimeType);
-  rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate(), audioBitsPerSecond: 192000 });
-  rec.ondataavailable = e => {
-    if (!e.data.size) return;
-    chunks.push(e.data);
-    RecStore.add(e.data);   // crash safety: every second of video is also kept in browser storage
-  };
-  rec.onstop = () => finishRec(mimeType);
-  rec.start(1000);
-  recStartedAt = performance.now(); recElapsed = 0;
-  timer.running = false; timer.slideStart = 0;
-  recTimer = setInterval(updateRecBadge, 250);
-  document.querySelectorAll('[data-k="res"]').forEach(el => el.disabled = true);
-  $('#btnRec').disabled = false; $('#btnRec').textContent = '■ Stop recording';
-  $('#btnPause').disabled = false;
-  $('#recBadge').style.display = 'block'; updateRecBadge();
-}
-
-function stopRec() {
-  if (!rec || rec.state === 'inactive') return;
-  timer.acc = recTimeMs(); timer.running = false;   // timer keeps showing the final length
-  rec.stop();
-}
-
-let resuming = false;
-async function togglePause() {
-  if (!rec || resuming) return;
-  if (rec.state === 'recording') {
-    rec.pause(); recElapsed += performance.now() - recStartedAt;
-    $('#btnPause').textContent = 'Resume';
-  } else if (rec.state === 'paused') {
-    resuming = true; updateRecBadge();
-    await countdown(3);
-    resuming = false;
-    if (!rec || rec.state !== 'paused') return;
-    rec.resume(); recStartedAt = performance.now();
-    $('#btnPause').textContent = 'Pause';
-  }
-  updateRecBadge();
-}
-
-function recTimeMs() {
-  return rec ? recElapsed + (rec.state === 'paused' ? 0 : performance.now() - recStartedAt) : 0;
-}
-
-function updateRecBadge() {
-  if (!rec) return;
-  const paused = rec.state === 'paused';
-  const t = recTimeMs();
-  const b = $('#recBadge');
-  b.classList.toggle('paused', paused);
-  b.textContent = `${paused ? '❚❚ PAUSED' : '● REC'} ${fmtTime(t)}`;
-  $('#pausedOverlay').style.display = paused && !resuming ? 'flex' : 'none';
-}
-
-function finishRec(mimeType) {
-  clearInterval(recTimer);
-  const blob = new Blob(chunks, { type: mimeType.split(';')[0] });
-  const ext = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
-  const d = new Date(), pad = n => String(n).padStart(2, '0');
-  const name = `presentation-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.${ext}`;
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = name;
-  a.textContent = `⬇ ${name} (${(blob.size / 1048576).toFixed(1)} MB)`;
-  $('#recordings').prepend(a);
-  a.click();
-  rec = null; chunks = [];
-  document.querySelectorAll('[data-k="res"]').forEach(el => el.disabled = false);
-  $('#btnRec').textContent = '● Start recording';
-  $('#btnPause').disabled = true; $('#btnPause').textContent = 'Pause';
-  $('#recBadge').style.display = 'none';
-  $('#pausedOverlay').style.display = 'none';
-  RecStore.clear();
-  toast('Saved ' + name + '. Check your Downloads folder.');
-}
-
-// ---------- crash recovery: recording chunks mirrored to IndexedDB ----------
-const RecStore = (() => {
+// ----- storage -----
+const TakeDB = (() => {
   let dbp = null;
   const db = () => dbp ??= new Promise((res, rej) => {
-    const r = indexedDB.open('presenter-studio', 1);
-    r.onupgradeneeded = () => { r.result.createObjectStore('chunks', { autoIncrement: true }); r.result.createObjectStore('meta'); };
+    const r = indexedDB.open('presenter-studio-takes', 1);
+    r.onupgradeneeded = () => {
+      r.result.createObjectStore('chunks', { autoIncrement: true }).createIndex('take', 'take');
+      r.result.createObjectStore('session');
+    };
     r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
   });
-  const run = async (mode, fn) => {
+  const run = async (stores, mode, fn) => {
     const d = await db();
     return new Promise((res, rej) => {
-      const t = d.transaction(['chunks', 'meta'], mode);
-      fn(t); t.oncomplete = () => res(); t.onerror = t.onabort = () => rej(t.error);
+      const t = d.transaction(stores, mode);
+      const req = fn(t);
+      t.oncomplete = () => res(req?.result); t.onerror = t.onabort = () => rej(t.error);
     });
   };
-  const quiet = p => p.catch(err => console.warn('recording backup:', err));
   return {
-    start: mime => quiet(run('readwrite', t => {
-      t.objectStore('chunks').clear();
-      t.objectStore('meta').put({ mime, started: Date.now() }, 'current');
-    })),
-    add: blob => quiet(run('readwrite', t => t.objectStore('chunks').add(blob))),
-    clear: () => quiet(run('readwrite', t => { t.objectStore('chunks').clear(); t.objectStore('meta').delete('current'); })),
-    async load() {
-      let meta, blobs;
-      await run('readonly', t => {
-        const m = t.objectStore('meta').get('current'), c = t.objectStore('chunks').getAll();
-        m.onsuccess = () => meta = m.result; c.onsuccess = () => blobs = c.result;
-      });
-      return meta && blobs?.length ? { meta, blobs } : null;
-    },
+    addChunks: r => run(['chunks'], 'readwrite', t => { t.objectStore('chunks').add(r); }),
+    getChunks: take => run(['chunks'], 'readonly', t => t.objectStore('chunks').index('take').getAll(take)),
+    deleteTake: take => run(['chunks'], 'readwrite', t => {
+      const store = t.objectStore('chunks'), cur = store.index('take').openKeyCursor(IDBKeyRange.only(take));
+      cur.onsuccess = () => { const c = cur.result; if (c) { store.delete(c.primaryKey); c.continue(); } };
+    }),
+    saveSession: s => run(['session'], 'readwrite', t => { t.objectStore('session').put(s, 'current'); }),
+    loadSession: () => run(['session'], 'readonly', t => t.objectStore('session').get('current')),
+    clearAll: () => run(['chunks', 'session'], 'readwrite', t => { t.objectStore('chunks').clear(); t.objectStore('session').clear(); }),
   };
 })();
 
-async function checkRecovery() {
-  let found = null;
-  try { found = await RecStore.load(); } catch {}
-  if (!found || rec) return;
-  const size = found.blobs.reduce((s, b) => s + b.size, 0);
-  $('#recoverInfo').innerHTML = `<b>Unfinished recording found</b><br>Started ${new Date(found.meta.started).toLocaleString()}, ` +
-    `${(size / 1048576).toFixed(0)} MB. The browser was probably closed before you pressed Stop.`;
-  $('#recoverBox').hidden = false;
-  $('#btnRecover').onclick = () => {
-    const ext = found.meta.mime.startsWith('video/mp4') ? 'mp4' : 'webm';
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob(found.blobs, { type: found.meta.mime.split(';')[0] }));
-    a.download = `presentation-recovered-${found.meta.started}.${ext}`; a.click();
-    $('#recoverBox').hidden = true; RecStore.clear();
-    toast('Recovered recording saved to Downloads');
-  };
-  $('#btnDiscard').onclick = () => {
-    if (!confirm('Delete the unfinished recording? This cannot be undone.')) return;
-    $('#recoverBox').hidden = true; RecStore.clear();
-  };
+function saveSession() {
+  if (!rec) return Promise.resolve();
+  const { live, state, ...s } = rec;
+  return TakeDB.saveSession(s).catch(err => console.warn('session save:', err));
 }
 
-$('#btnRec').onclick = () => rec ? stopRec() : startRec();
-$('#btnPause').onclick = togglePause;
-window.addEventListener('beforeunload', e => { if (rec) { e.preventDefault(); e.returnValue = ''; } });
+const newBuf = () => ({ parts: [], index: [], size: 0 });
+function pushChunk(take, kind, chunk) {
+  if (take.discarded) return;
+  let p = pending.get(take.id);
+  if (!p) pending.set(take.id, p = { v: newBuf(), a: newBuf() });
+  const b = p[kind], data = new Uint8Array(chunk.byteLength);
+  chunk.copyTo(data);
+  b.index.push({ o: b.size, s: data.byteLength, t: chunk.timestamp - take.startUs, d: chunk.duration || 0, k: chunk.type === 'key' ? 1 : 0 });
+  b.parts.push(data); b.size += data.byteLength;
+}
+function flushPending() {
+  const writes = [];
+  for (const [id, p] of pending) {
+    for (const kind of ['v', 'a']) {
+      const b = p[kind];
+      if (!b.parts.length) continue;
+      writes.push(TakeDB.addChunks({ take: id, kind, blob: new Blob(b.parts), index: b.index }));
+      p[kind] = newBuf();
+    }
+    if (!R.recent.some(t => t.id === id && t.endUs == null)) pending.delete(id);
+  }
+  return Promise.all(writes).catch(err => {
+    console.error(err); toast('Could not save to browser storage: ' + err.message, 8000);
+  });
+}
+setInterval(flushPending, 1000);
+
+function dropTake(id) {
+  const t = R.recent.find(x => x.id === id);
+  if (t) { t.discarded = true; t.endUs ??= performance.now() * 1000; }
+  pending.delete(id);
+  TakeDB.deleteTake(id).catch(() => {});
+}
+
+// ----- encoders -----
+function videoConfig(codec, br) {
+  const c = { codec, width: W, height: H, bitrate: br, framerate: FPS, latencyMode: 'quality', bitrateMode: 'variable' };
+  if (codec.startsWith('avc')) c.avc = { format: 'avc' };
+  return c;
+}
+async function pickCodecs() {
+  let video = null, audio = null;
+  for (const [codec, mux] of [['avc1.640033', 'avc'], ['avc1.4d0033', 'avc'], ['avc1.420033', 'avc'], ['vp09.00.51.08', 'vp9']]) {
+    try { if ((await VideoEncoder.isConfigSupported(videoConfig(codec, bitrate()))).supported) { video = { codec, mux }; break; } } catch {}
+  }
+  const track = micStream?.getAudioTracks()[0];
+  if (CAN_RECORD_AUDIO && track) {
+    const sampleRate = track.getSettings().sampleRate || 48000;
+    for (const [codec, mux] of [['mp4a.40.2', 'aac'], ['opus', 'opus']]) {
+      try {
+        if ((await AudioEncoder.isConfigSupported({ codec, sampleRate, numberOfChannels: 1, bitrate: 160000 })).supported) {
+          audio = { codec, mux, sampleRate }; break;
+        }
+      } catch {}
+    }
+  }
+  return video ? { video, audio } : null;
+}
+
+const toBytes = x => x instanceof ArrayBuffer ? new Uint8Array(x.slice(0)) : new Uint8Array(x.buffer, x.byteOffset, x.byteLength).slice();
+function setCfg(kind, c) {
+  const enc = rec?.encs[R.encId];
+  if (!enc) return;
+  const cs = c.colorSpace;
+  enc[kind] = {
+    codec: c.codec, codedWidth: c.codedWidth, codedHeight: c.codedHeight,
+    sampleRate: c.sampleRate, numberOfChannels: c.numberOfChannels,
+    description: c.description ? toBytes(c.description) : undefined,
+    colorSpace: cs && cs.primaries && cs.transfer && cs.matrix
+      ? { primaries: cs.primaries, transfer: cs.transfer, matrix: cs.matrix, fullRange: !!cs.fullRange } : undefined,
+  };
+  saveSession();
+}
+const takeFor = ts => {
+  for (let i = R.recent.length - 1; i >= 0; i--) {
+    const t = R.recent[i];
+    if (t.startUs != null && ts >= t.startUs && (t.endUs == null || ts < t.endUs)) return t;
+  }
+  return null;
+};
+function encoderFailed(err) {
+  console.error(err);
+  toast('Recording error: ' + err.message + '. Your earlier takes are safe.', 8000);
+  if (rec?.state === 'recording') pauseRec();
+}
+async function ensureEncoders() {
+  if (R.venc?.state === 'configured' && (!rec.audio || R.aenc?.state === 'configured')) return;
+  for (const e of [R.venc, R.aenc]) try { e?.close(); } catch {}
+  R.encId = uid();
+  rec.encs[R.encId] = { v: null, a: null };
+  R.venc = new VideoEncoder({
+    output: (chunk, meta) => {
+      if (meta?.decoderConfig) setCfg('v', meta.decoderConfig);
+      const t = takeFor(chunk.timestamp);
+      if (t) pushChunk(t, 'v', chunk);
+    },
+    error: encoderFailed,
+  });
+  R.venc.configure(videoConfig(rec.video.codec, rec.bitrate));
+  R.aenc = null;
+  if (rec.audio) {
+    R.aenc = new AudioEncoder({
+      output: (chunk, meta) => {
+        if (meta?.decoderConfig) setCfg('a', meta.decoderConfig);
+        const t = takeFor(chunk.timestamp);
+        if (t) pushChunk(t, 'a', chunk);
+      },
+      error: encoderFailed,
+    });
+    R.aenc.configure({ codec: rec.audio.codec, sampleRate: rec.audio.sampleRate, numberOfChannels: 1, bitrate: 160000 });
+  }
+}
+
+// called from draw() for every frame while a take is live
+function captureFrame() {
+  const t = rec.live, enc = R.venc;
+  if (!enc || enc.state !== 'configured' || enc.encodeQueueSize > 6) return;   // drop a frame rather than fall behind
+  const ts = Math.round(performance.now() * 1000);
+  if (t.startUs == null) t.startUs = ts;
+  const key = t.frames === 0 || ts - t.lastKey >= 2e6;   // every take starts on a keyframe so it can be cut cleanly
+  const frame = new VideoFrame(out, { timestamp: ts });
+  try { enc.encode(frame, { keyFrame: key }); } finally { frame.close(); }
+  if (key) t.lastKey = ts;
+  t.frames++;
+}
+
+// Microphone audio is re-timestamped onto the same clock as the video frames (performance.now).
+// The offset between the two clocks is measured during the countdown, before anything is kept.
+function startAudio() {
+  stopAudio();
+  const src = micStream?.getAudioTracks()[0];
+  if (!rec?.audio || !R.aenc || !src) return;
+  const track = src.clone();
+  const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+  Object.assign(R, { track, reader, aOffset: null, aCalib: 0 });
+  (async () => {
+    for (;;) {
+      let r;
+      try { r = await reader.read(); } catch { break; }
+      if (r.done) break;
+      handleAudio(r.value);
+    }
+  })();
+}
+function stopAudio() {
+  try { R.reader?.cancel(); } catch {}
+  R.track?.stop();
+  R.reader = R.track = null;
+}
+function handleAudio(data) {
+  try {
+    const off = performance.now() * 1000 - (data.timestamp + data.duration);
+    if (R.aCalib < 25) { R.aOffset = R.aOffset == null ? off : Math.min(R.aOffset, off); R.aCalib++; return; }
+    const ts = Math.round(data.timestamp + R.aOffset), live = rec?.live;
+    if (!live || live.startUs == null || ts + data.duration <= live.startUs || R.aenc?.state !== 'configured') return;
+    if (data.sampleRate !== rec.audio.sampleRate) {
+      if (!R.rateWarned) { R.rateWarned = true; toast('Microphone sample rate changed. Pick the microphone again, then start a new recording.'); }
+      return;
+    }
+    const n = data.numberOfFrames, ch = data.numberOfChannels;
+    const mono = new Float32Array(n), tmp = new Float32Array(n);
+    for (let c = 0; c < ch; c++) {
+      data.copyTo(tmp, { planeIndex: c, format: 'f32-planar' });
+      for (let i = 0; i < n; i++) mono[i] += tmp[i] / ch;
+    }
+    const ad = new AudioData({ format: 'f32-planar', sampleRate: data.sampleRate, numberOfFrames: n, numberOfChannels: 1, timestamp: ts, data: mono });
+    R.aenc.encode(ad); ad.close();
+  } finally { data.close(); }
+}
+
+// ----- takes -----
+function beginTake(startUs = null) {
+  const t = { id: uid(), slide: slides.page, startUs, endUs: null, frames: 0, lastKey: 0, discarded: false, encId: R.encId };
+  R.recent.push(t);
+  if (R.recent.length > 60) R.recent.shift();
+  rec.live = t;
+}
+function endTake() {
+  const t = rec.live;
+  if (!t) return null;
+  rec.live = null;
+  t.endUs = performance.now() * 1000;
+  // under 0.3 s (e.g. clicking quickly past a slide): nothing worth keeping
+  if (t.startUs == null || !t.frames || t.endUs - t.startUs < 3e5) { dropTake(t.id); return null; }
+  rec.takes.splice(rec.insertAt, 0, { id: t.id, slide: t.slide, durUs: t.endUs - t.startUs, encId: t.encId });
+  rec.insertAt++;
+  saveSession(); renderTakes();
+  return t;
+}
+
+const liveMs = () => rec?.live?.startUs != null ? performance.now() - rec.live.startUs / 1000 : 0;
+function recTimeMs() {
+  return rec ? rec.takes.reduce((s, t) => s + t.durUs, 0) / 1000 + liveMs() : 0;
+}
+function recSlideMs() {
+  if (!rec) return 0;
+  let ms = liveMs();
+  for (let i = rec.insertAt - 1; i >= 0 && rec.takes[i].slide === slides.page; i--) ms += rec.takes[i].durUs / 1000;
+  return ms;
+}
+
+// ----- controls -----
+async function startSession() {
+  if (!CAN_RECORD) return toast('Recording needs a recent version of Chrome or Edge.');
+  busy = true; updateRecUI();
+  const codecs = await pickCodecs().catch(() => null);
+  busy = false;
+  if (!codecs) { updateRecUI(); return toast('This browser cannot encode video at this resolution. Try 1080p.'); }
+  if (!codecs.audio) toast(micStream ? 'This browser cannot record audio here. Recording video only.' : 'No microphone. Recording video only.', 6000);
+  rec = { id: uid(), created: Date.now(), res: S.res, W, H, bitrate: bitrate(), video: codecs.video, audio: codecs.audio,
+          takes: [], insertAt: 0, encs: {}, state: 'paused', live: null };
+  navigator.storage?.persist?.().catch(() => {});
+  timer.running = false;
+  await saveSession();
+  renderTakes();
+  await resumeRec();
+}
+
+async function resumeRec() {
+  if (!rec || rec.state === 'recording' || busy) return;
+  busy = true; updateRecUI();
+  try {
+    await ensureEncoders();
+    startAudio();   // calibrates during the countdown
+    await countdown(3);
+    if (!rec) return;
+    rec.state = 'recording';
+    beginTake(null);
+  } catch (err) {
+    stopAudio(); toast('Could not start recording: ' + err.message, 8000);
+  } finally {
+    busy = false; updateRecUI(); renderTakes();
+  }
+}
+
+function pauseRec() {
+  if (!rec || rec.state !== 'recording') return;
+  endTake();
+  rec.state = 'paused';
+  stopAudio();
+  updateRecUI(); renderTakes();
+}
+
+function recToggle() {
+  if (busy) return;
+  if (!rec) startSession();
+  else if (rec.state === 'recording') pauseRec();
+  else resumeRec();
+}
+
+// called by showPage() whenever the slide changes
+function onSlideChanged() {
+  if (!rec || rec.state !== 'recording' || !rec.live) return;
+  const prev = endTake();
+  if (rec.insertAt < rec.takes.length) {
+    // a slide was re-recorded in the middle; what follows is already recorded, so stop here
+    rec.state = 'paused'; stopAudio();
+    rec.insertAt = rec.takes.length;
+    saveSession(); updateRecUI(); renderTakes();
+    const last = rec.takes[rec.takes.length - 1].slide;
+    toast(`Re-recorded slide ${prev?.slide ?? ''} and paused, because the slides after it are already recorded. ` +
+          `New recording now continues at the end (after slide ${last}).`, 9000);
+    return;
+  }
+  beginTake(prev ? prev.endUs : performance.now() * 1000);   // continuous: no gap between slides
+}
+
+async function redoSlide() {
+  if (!rec || busy) return;
+  const slide = slides.page;
+  if (rec.state === 'recording') {
+    const t = rec.live; rec.live = null;
+    if (t) dropTake(t.id);
+    rec.state = 'paused'; stopAudio();
+  }
+  const before = () => rec.insertAt > 0 && rec.takes[rec.insertAt - 1].slide === slide;
+  if (before()) {
+    while (before()) { const [t] = rec.takes.splice(--rec.insertAt, 1); dropTake(t.id); }
+  } else {
+    const first = rec.takes.findIndex(t => t.slide === slide);
+    if (first >= 0) {
+      if (!confirm(`Slide ${slide} was recorded earlier. Delete that take and record it again in the same place?`)) {
+        updateRecUI(); renderTakes(); return;
+      }
+      for (let i = rec.takes.length - 1; i >= 0; i--) {
+        if (rec.takes[i].slide === slide) { dropTake(rec.takes[i].id); rec.takes.splice(i, 1); }
+      }
+      rec.insertAt = first;
+    }
+  }
+  saveSession(); renderTakes(); updateRecUI();
+  toast(`Recording slide ${slide} again`, 2500);
+  await resumeRec();
+}
+
+function deleteTake(i) {
+  if (!rec || busy) return;
+  if (rec.state === 'recording') return toast('Pause first (R), then delete takes.');
+  const t = rec.takes[i];
+  if (!confirm(`Delete the take of slide ${t.slide} (${fmtShort(t.durUs / 1000)})?`)) return;
+  rec.takes.splice(i, 1); dropTake(t.id);
+  rec.insertAt = i;
+  saveSession(); renderTakes(); updateRecUI();
+  showPage(t.slide);
+  toast(i < rec.takes.length
+    ? `Deleted. Press R to record slide ${t.slide} again. It goes back in the same place.`
+    : `Deleted. Press R to record slide ${t.slide} again.`, 6000);
+}
+
+async function newRecording() {
+  if (!rec || busy) return;
+  if (rec.takes.length && !confirm('Start a new recording? This deletes every take of the current one. Save the video first if you need it.')) return;
+  if (rec.live) dropTake(rec.live.id);
+  stopAudio();
+  rec = null; pending.clear();
+  await TakeDB.clearAll().catch(() => {});
+  timer.acc = 0; timer.slideStart = 0;
+  updateRecUI(); renderTakes();
+}
+
+// ----- saving: join takes into one MP4 -----
+function cfgKey(e) {
+  if (!e?.v) return 'missing';
+  const hex = d => d ? Array.from(d, b => b.toString(16).padStart(2, '0')).join('') : '';
+  return [e.v.codec, hex(e.v.description), e.a?.codec, hex(e.a?.description)].join('|');
+}
+
+async function muxTakes(takes, progress) {
+  const enc = rec.encs[takes[0].encId];
+  const parts = [];
+  let end = 0, sequential = true;
+  const muxer = new Mp4Muxer.Muxer({
+    target: new Mp4Muxer.StreamTarget({
+      onData: (data, pos) => {
+        if (pos !== end) sequential = false;
+        end = Math.max(end, pos + data.byteLength);
+        parts.push({ pos, blob: new Blob([data]) });   // blobs can live on disk, so long videos don't fill memory
+      },
+      chunked: true, chunkSize: 8 * 2 ** 20,
+    }),
+    video: { codec: rec.video.mux, width: rec.W, height: rec.H },
+    audio: enc.a ? { codec: rec.audio.mux, numberOfChannels: 1, sampleRate: rec.audio.sampleRate } : undefined,
+    fastStart: 'fragmented',
+    firstTimestampBehavior: 'cross-track-offset',
+  });
+
+  let cursor = 0, lastV = -1, lastA = -1, firstV = true, firstA = true;
+  for (let i = 0; i < takes.length; i++) {
+    const take = takes[i], v = [], a = [];
+    for (const r of await TakeDB.getChunks(take.id)) {
+      const buf = new Uint8Array(await r.blob.arrayBuffer());
+      for (const e of r.index) {
+        if (e.t < 0 || e.t >= take.durUs) continue;
+        (r.kind === 'v' ? v : a).push({ t: e.t, d: e.d, k: e.k, data: buf.subarray(e.o, e.o + e.s) });
+      }
+    }
+    while (v.length && !v[0].k) v.shift();   // a take must start on a keyframe
+    for (let j = 0; j < v.length; j++) v[j].d = Math.max(1000, (j + 1 < v.length ? v[j + 1].t : take.durUs) - v[j].t);
+    a.sort((x, y) => x.t - y.t);
+    let vi = 0, ai = 0;
+    while (vi < v.length || ai < a.length) {
+      if (ai >= a.length || (vi < v.length && v[vi].t <= a[ai].t)) {
+        const c = v[vi++];
+        const ts = Math.max(cursor + c.t, lastV + 1); lastV = ts;
+        muxer.addVideoChunkRaw(c.data, c.k ? 'key' : 'delta', ts, c.d, firstV ? { decoderConfig: enc.v } : undefined);
+        firstV = false;
+      } else {
+        const c = a[ai++];
+        if (!enc.a) continue;
+        const ts = Math.max(cursor + c.t, lastA); lastA = ts;
+        muxer.addAudioChunkRaw(c.data, c.k ? 'key' : 'delta', ts, c.d, firstA ? { decoderConfig: enc.a } : undefined);
+        firstA = false;
+      }
+    }
+    cursor += take.durUs;
+    progress((i + 1) / takes.length);
+    await new Promise(r => setTimeout(r));   // keep the page responsive
+  }
+  muxer.finalize();
+  if (sequential) return new Blob(parts.map(p => p.blob), { type: 'video/mp4' });
+  const bytes = new Uint8Array(end);
+  for (const p of parts) bytes.set(new Uint8Array(await p.blob.arrayBuffer()), p.pos);
+  return new Blob([bytes], { type: 'video/mp4' });
+}
+
+function offerDownload(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  a.textContent = `⬇ ${name} (${(blob.size / 1048576).toFixed(1)} MB)`;
+  $('#recordings').prepend(a);
+  a.click();
+}
+
+async function saveVideo() {
+  if (!rec || busy) return;
+  if (rec.state === 'recording') pauseRec();
+  if (!rec.takes.length) return toast('Nothing recorded yet.');
+  busy = true; updateRecUI(); setStatus('Saving video…');
+  try {
+    await Promise.all([R.venc, R.aenc].filter(e => e?.state === 'configured').map(e => e.flush()));
+    await flushPending();
+    // takes recorded with identical encoder settings can share one file (normally all of them)
+    const groups = [];
+    for (const t of rec.takes) {
+      const key = cfgKey(rec.encs[t.encId]), g = groups[groups.length - 1];
+      if (key === 'missing') continue;
+      if (g && g.key === key) g.takes.push(t); else groups.push({ key, takes: [t] });
+    }
+    const d = new Date(), pad = n => String(n).padStart(2, '0');
+    const base = `presentation-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+    for (let i = 0; i < groups.length; i++) {
+      const blob = await muxTakes(groups[i].takes, p => setStatus(`Saving video… ${Math.round((i + p) / groups.length * 100)}%`));
+      offerDownload(blob, groups.length > 1 ? `${base}-part${i + 1}.mp4` : `${base}.mp4`);
+    }
+    toast(groups.length > 1
+      ? `Saved as ${groups.length} files: the browser's video settings changed between sessions, so they couldn't be joined into one.`
+      : 'Saved. Check your Downloads folder. Your takes are kept, so you can still redo slides and save again.', 9000);
+  } catch (err) {
+    console.error(err); toast('Could not save the video: ' + err.message, 10000);
+  } finally {
+    busy = false; setStatus(''); updateRecUI();
+  }
+}
+
+// ----- UI -----
+function updateRecUI() {
+  const recording = rec?.state === 'recording';
+  const b = $('#btnRec');
+  b.textContent = !rec ? '● Start recording' : recording ? '❚❚ Pause' : '● Resume';
+  b.disabled = busy || !CAN_RECORD;
+  $('#btnRedo').disabled = !rec || busy;
+  $('#btnSave').disabled = !rec || busy || (!rec.takes.length && !recording);
+  $('#btnNew').disabled = !rec || busy;
+  document.querySelectorAll('[data-k="res"]').forEach(el => el.disabled = !!rec);
+  updateRecBadge();
+}
+function updateRecBadge() {
+  const badge = $('#recBadge');
+  if (!rec) { badge.style.display = 'none'; $('#pausedOverlay').style.display = 'none'; return; }
+  const recording = rec.state === 'recording';
+  badge.style.display = 'block';
+  badge.classList.toggle('paused', !recording);
+  badge.textContent = `${recording ? '● REC' : '❚❚ PAUSED'} ${fmtTime(recTimeMs())}`;
+  $('#pausedOverlay').style.display = !recording && !busy ? 'flex' : 'none';
+  $('#takesTotal').textContent = `${rec.takes.length} take${rec.takes.length === 1 ? '' : 's'} · ${fmtTime(recTimeMs())}`;
+}
+setInterval(updateRecBadge, 250);
+
+function renderTakes() {
+  $('#takesBox').hidden = !rec;
+  if (!rec) return;
+  const list = $('#takesList');
+  list.innerHTML = '';
+  const marker = () => {
+    const m = document.createElement('span');
+    m.className = 'take-here';
+    m.textContent = rec.state === 'recording' ? `● slide ${slides.page}` : '▸ next';
+    return m;
+  };
+  rec.takes.forEach((t, i) => {
+    if (i === rec.insertAt) list.appendChild(marker());
+    const el = document.createElement('span');
+    el.className = 'take';
+    el.innerHTML = `<button class="take-go" title="Go to slide ${t.slide}">S${t.slide} · ${fmtShort(t.durUs / 1000)}</button>` +
+                   `<button class="take-del" title="Delete this take">✕</button>`;
+    el.querySelector('.take-go').onclick = () => { if (rec.state !== 'recording') showPage(t.slide); };
+    el.querySelector('.take-del').onclick = () => deleteTake(i);
+    list.appendChild(el);
+  });
+  if (rec.insertAt >= rec.takes.length) list.appendChild(marker());
+  $('#btnToEnd').hidden = rec.insertAt >= rec.takes.length;
+  updateRecBadge();
+}
+
+async function restoreSession() {
+  updateFmtNote();
+  if (!CAN_RECORD) { updateRecUI(); return; }
+  let s = null;
+  try { s = await TakeDB.loadSession(); } catch {}
+  if (s?.takes?.length) {
+    rec = { ...s, state: 'paused', live: null };
+    if (rec.res !== S.res) { S.res = rec.res; save(); syncAll(); applyRes(); updateFmtNote(); }
+    toast(`Your recording from ${new Date(rec.created).toLocaleString()} is still here (${rec.takes.length} takes, ${fmtTime(recTimeMs())}). ` +
+          'Go to the slide you want and press R to continue, or click Save video.', 10000);
+  } else if (s) {
+    TakeDB.clearAll().catch(() => {});
+  }
+  updateRecUI(); renderTakes();
+}
+
+$('#btnRec').onclick = recToggle;
+$('#btnRedo').onclick = redoSlide;
+$('#btnSave').onclick = saveVideo;
+$('#btnNew').onclick = newRecording;
+$('#btnToEnd').onclick = () => { if (rec && rec.state !== 'recording') { rec.insertAt = rec.takes.length; saveSession(); renderTakes(); } };
+window.addEventListener('beforeunload', e => { if (rec?.state === 'recording' || busy) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('pagehide', () => { if (rec?.state === 'recording') { endTake(); flushPending(); } });
 
 // ---------- controls ----------
 function showVal(el) {
@@ -997,8 +1411,8 @@ document.addEventListener('keydown', e => {
   else if (['ArrowLeft', 'ArrowUp', 'PageUp', 'Backspace'].includes(k)) { e.preventDefault(); prevSlide(); }
   else if (k === 'Home') showPage(1);
   else if (k === 'End') showPage(slides.count);
-  else if (k === 'r' || k === 'R') rec ? stopRec() : startRec();
-  else if (k === 'p' || k === 'P') togglePause();
+  else if (k === 'r' || k === 'R' || ((k === 'p' || k === 'P') && rec)) recToggle();
+  else if (k === 'z' || k === 'Z') redoSlide();
   else if (k === 'c' || k === 'C') { S.cam.on = !S.cam.on; save(); syncAll(); }
   else if (k === 'b' || k === 'B') { S.cam.blur = !S.cam.blur; save(); syncAll(); if (S.cam.blur) ensureSegmenter(); }
   else if (k === 'h' || k === 'H') document.body.classList.toggle('hide-panel');
@@ -1163,7 +1577,7 @@ const fmtShort = ms => {
 function renderTimer() {
   document.body.classList.toggle('no-timer', !S.timer.show);
   if (!S.timer.show) return;
-  const total = timerNow(), slide = total - timer.slideStart;
+  const total = timerNow(), slide = rec ? recSlideMs() : total - timer.slideStart;
   const min = S.timer.min * 60000, max = S.timer.max * 60000;
   const totalCls = max ? (total > max ? 'over' : total >= min ? 'ok' : '') : '';
   $('#tTotal').textContent = fmtTime(total);
@@ -1383,7 +1797,7 @@ updateCounter();
 loadNotes('untitled');
 applyView();
 if (S.cam.blur) ensureSegmenter();
-checkRecovery();
+restoreSession();
 if (!navigator.mediaDevices?.getUserMedia) {
   toast('Camera access needs Chrome or Edge, opened via http://localhost (see instructions).', 10000);
 } else {
