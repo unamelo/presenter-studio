@@ -15,7 +15,7 @@ Everything happens on your own computer. Slides, video and notes are never uploa
 
 ## Use it
 
-**Online:** open the GitHub Pages site for this repo (Settings → Pages shows the link) in **Chrome** or **Edge**.
+**Online:** open <https://unamelo.github.io/presenter-studio/> in **Chrome** or **Edge**.
 
 **Locally** (Mac, Windows or Linux):
 
