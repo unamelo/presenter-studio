@@ -1198,8 +1198,8 @@ function cfgKey(e) {
   return [e.v.codec, hex(e.v.description), e.a?.codec, hex(e.a?.description)].join('|');
 }
 
-async function muxTakes(takes, progress) {
-  const enc = rec.encs[takes[0].encId];
+// returns the file as positioned pieces: { parts: [{ pos, blob }], size, sequential }
+async function muxTakes(takes, enc, progress) {
   const parts = [];
   let end = 0, sequential = true;
   const muxer = new Mp4Muxer.Muxer({
@@ -1250,16 +1250,41 @@ async function muxTakes(takes, progress) {
     await new Promise(r => setTimeout(r));   // keep the page responsive
   }
   muxer.finalize();
-  if (sequential) return new Blob(parts.map(p => p.blob), { type: 'video/mp4' });
-  const bytes = new Uint8Array(end);
-  for (const p of parts) bytes.set(new Uint8Array(await p.blob.arrayBuffer()), p.pos);
+  return { parts, size: end, sequential };
+}
+
+async function toBlob(file) {
+  if (file.sequential) return new Blob(file.parts.map(p => p.blob), { type: 'video/mp4' });
+  const bytes = new Uint8Array(file.size);
+  for (const p of file.parts) bytes.set(new Uint8Array(await p.blob.arrayBuffer()), p.pos);
   return new Blob([bytes], { type: 'video/mp4' });
 }
 
-function offerDownload(blob, name) {
+// Ask where to save before doing any work: the Save dialog needs the click that started it.
+// Writing to a chosen file avoids Chrome silently blocking a second automatic download.
+async function pickSaveFile(name) {
+  if (!window.showSaveFilePicker) return null;
+  try {
+    return await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'MP4 video', accept: { 'video/mp4': ['.mp4'] } }] });
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;   // user cancelled
+    return null;                                 // not allowed here: fall back to a download link
+  }
+}
+
+async function writeFile(file, handle, name) {
+  const mb = (file.size / 1048576).toFixed(1);
+  if (handle) {
+    const w = await handle.createWritable();
+    for (const p of file.parts) await w.write({ type: 'write', position: p.pos, data: p.blob });
+    await w.close();
+    $('#recordings').insertAdjacentHTML('afterbegin', `<p class="note">✓ Saved ${handle.name} (${mb} MB)</p>`);
+    return;
+  }
+  // fallback: a link the user can always click, even if the automatic download is blocked
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = name;
-  a.textContent = `⬇ ${name} (${(blob.size / 1048576).toFixed(1)} MB)`;
+  a.href = URL.createObjectURL(await toBlob(file)); a.download = name;
+  a.textContent = `⬇ Download ${name} (${mb} MB)`;
   $('#recordings').prepend(a);
   a.click();
 }
@@ -1268,26 +1293,32 @@ async function saveVideo() {
   if (!rec || busy) return;
   if (rec.state === 'recording') pauseRec();
   if (!rec.takes.length) return toast('Nothing recorded yet.');
+  const d = new Date(), pad = n => String(n).padStart(2, '0');
+  const base = `presentation-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+  let handle;
+  try { handle = await pickSaveFile(`${base}.mp4`); } catch { return; }   // cancelled
   busy = true; updateRecUI(); setStatus('Saving video…');
   try {
     await Promise.all([R.venc, R.aenc].filter(e => e?.state === 'configured').map(e => e.flush()));
     await flushPending();
     // takes recorded with identical encoder settings can share one file (normally all of them)
+    const fallback = Object.values(rec.encs).find(e => e?.v);
     const groups = [];
     for (const t of rec.takes) {
-      const key = cfgKey(rec.encs[t.encId]), g = groups[groups.length - 1];
-      if (key === 'missing') continue;
-      if (g && g.key === key) g.takes.push(t); else groups.push({ key, takes: [t] });
+      const enc = rec.encs[t.encId]?.v ? rec.encs[t.encId] : fallback;
+      if (!enc) continue;
+      const key = cfgKey(enc), g = groups[groups.length - 1];
+      if (g && g.key === key) g.takes.push(t); else groups.push({ key, enc, takes: [t] });
     }
-    const d = new Date(), pad = n => String(n).padStart(2, '0');
-    const base = `presentation-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+    if (!groups.length) throw new Error('no video data was found for these takes');
     for (let i = 0; i < groups.length; i++) {
-      const blob = await muxTakes(groups[i].takes, p => setStatus(`Saving video… ${Math.round((i + p) / groups.length * 100)}%`));
-      offerDownload(blob, groups.length > 1 ? `${base}-part${i + 1}.mp4` : `${base}.mp4`);
+      const file = await muxTakes(groups[i].takes, groups[i].enc, p => setStatus(`Saving video… ${Math.round((i + p) / groups.length * 100)}%`));
+      setStatus('Writing file…');
+      await writeFile(file, i === 0 ? handle : null, groups.length > 1 ? `${base}-part${i + 1}.mp4` : `${base}.mp4`);
     }
     toast(groups.length > 1
       ? `Saved as ${groups.length} files: the browser's video settings changed between sessions, so they couldn't be joined into one.`
-      : 'Saved. Check your Downloads folder. Your takes are kept, so you can still redo slides and save again.', 9000);
+      : `Saved${handle ? ' ' + handle.name : ''}. Your takes are kept, so you can still redo slides and save again.`, 9000);
   } catch (err) {
     console.error(err); toast('Could not save the video: ' + err.message, 10000);
   } finally {

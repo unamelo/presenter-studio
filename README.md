@@ -40,7 +40,7 @@ On a **Mac**, the first time you use it, allow Chrome to use the camera and micr
    - Mistake? Press **Z** to throw away this slide's take and record the slide again (3-2-1 countdown).
    - Tired? Press **R** to pause, and **R** again to continue. You can even close the browser and come back later.
    - To redo an earlier slide, pause, then click **✕** on its take in the timeline and press **R**. The new take goes back in the same place.
-6. Click **Save video** to download the finished MP4. Your takes are kept, so you can still fix a slide and save again. **New recording…** clears them.
+6. Click **Save video** and choose where to save the finished MP4. Your takes are kept, so you can still fix a slide and save again. **New recording…** clears them.
 
 ### Script format for import
 
