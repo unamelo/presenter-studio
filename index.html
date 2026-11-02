@@ -1688,7 +1688,11 @@ function parseScript(text) {
   return versions.map(v => {
     const notes = {}; let words = 0;
     for (const [n, s] of Object.entries(v.slides)) {
-      const body = s.body.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+      // scripts pasted without blank lines between paragraphs still get a gap, for easier reading
+      const lines = s.body.map(l => l.trim());
+      while (lines.length && !lines[0]) lines.shift();
+      while (lines.length && !lines[lines.length - 1]) lines.pop();
+      const body = (lines.includes('') ? lines.join('\n') : lines.join('\n\n')).replace(/\n{3,}/g, '\n\n').trim();
       words += body.split(/\s+/).filter(Boolean).length;
       notes[n] = (s.cue ? `(${s.cue})\n\n` : '') + body;
     }
