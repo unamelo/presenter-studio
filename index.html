@@ -1022,7 +1022,8 @@ function captureFrame() {
 function startAudio() {
   stopAudio();
   const src = micStream?.getAudioTracks()[0];
-  if (!rec?.audio || !R.aenc || !src) return;
+  if (!rec?.audio || !R.aenc) return;
+  if (!src || src.readyState !== 'live') return toast('No microphone signal: this take is being recorded WITHOUT sound. Pick the microphone again.', 10000);
   const track = src.clone();
   const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
   Object.assign(R, { track, reader, aOffset: null, aCalib: 0 });
@@ -1033,6 +1034,8 @@ function startAudio() {
       if (r.done) break;
       handleAudio(r.value);
     }
+    // the reader only ends on its own when the microphone went away mid-recording
+    if (R.reader === reader && rec?.state === 'recording') toast('Microphone stopped: recording continues WITHOUT sound. Pause, pick the microphone again, then redo this slide.', 12000);
   })();
 }
 function stopAudio() {
@@ -1212,6 +1215,46 @@ async function newRecording() {
 }
 
 // ----- saving: join takes into one MP4 -----
+// The decoder settings (H.264 / AAC headers) are normally saved with the session when the encoder
+// starts. If they are missing, the takes can't be joined into a file. The same encoder with the same
+// settings produces the same headers, so ask it again: encode one blank frame / a moment of silence.
+async function rebuildCfg(kind) {
+  const Enc = kind === 'v' ? VideoEncoder : AudioEncoder;
+  return new Promise((res, rej) => {
+    let done = false;
+    const enc = new Enc({
+      output: (chunk, meta) => { if (!done && meta?.decoderConfig) { done = true; res(meta.decoderConfig); } },
+      error: rej,
+    });
+    if (kind === 'v') {
+      enc.configure(videoConfig(rec.video.codec, rec.bitrate));
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      c.getContext('2d').fillRect(0, 0, W, H);
+      const f = new VideoFrame(c, { timestamp: 0 });
+      try { enc.encode(f, { keyFrame: true }); } finally { f.close(); }
+    } else {
+      const sr = rec.audio.sampleRate, n = Math.round(sr / 10);
+      enc.configure({ codec: rec.audio.codec, sampleRate: sr, numberOfChannels: 1, bitrate: 160000 });
+      const ad = new AudioData({ format: 'f32-planar', sampleRate: sr, numberOfFrames: n, numberOfChannels: 1, timestamp: 0, data: new Float32Array(n) });
+      try { enc.encode(ad); } finally { ad.close(); }
+    }
+    enc.flush().then(() => { try { enc.close(); } catch {} if (!done) rej(new Error('encoder gave no decoder settings')); }, rej);
+  });
+}
+async function repairEncs() {
+  const prevId = R.encId;
+  for (const t of rec.takes) {
+    const enc = rec.encs[t.encId] ??= { v: null, a: null };
+    if (enc.v && (enc.a || !rec.audio)) continue;
+    setStatus('Rebuilding decoder settings…');
+    R.encId = t.encId;   // setCfg writes to rec.encs[R.encId]
+    try {
+      if (!enc.v) setCfg('v', await rebuildCfg('v'));
+      if (!enc.a && rec.audio) { try { setCfg('a', await rebuildCfg('a')); } catch (err) { console.warn('audio settings:', err); } }
+    } finally { R.encId = prevId; }
+  }
+}
+
 function cfgKey(e) {
   if (!e?.v) return 'missing';
   const hex = d => d ? Array.from(d, b => b.toString(16).padStart(2, '0')).join('') : '';
@@ -1321,6 +1364,7 @@ async function saveVideo() {
   try {
     await Promise.all([R.venc, R.aenc].filter(e => e?.state === 'configured').map(e => e.flush()));
     await flushPending();
+    await repairEncs();
     // takes recorded with identical encoder settings can share one file (normally all of them)
     const fallback = Object.values(rec.encs).find(e => e?.v);
     const groups = [];
