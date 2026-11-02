@@ -62,6 +62,8 @@ Markdown bold (`**Slide 1: …**`) is fine. The bracketed part at the end of a h
 | --- | --- |
 | `→` `Space` `Page Down` | Next slide (clickers work too) |
 | `←` `Page Up` | Previous slide |
+| Click or scroll down on the slides or notes | Next slide |
+| Scroll up on the slides or notes | Previous slide (long notes scroll first, then change slide) |
 | `R` | Start recording / pause / resume |
 | `Z` | Redo this slide |
 | `C` | Show / hide camera |

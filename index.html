@@ -138,7 +138,7 @@
   <main id="stage">
     <div id="viewCol">
       <div id="view">
-        <canvas id="out" width="1920" height="1080" title="Click: next slide"></canvas>
+        <canvas id="out" width="1920" height="1080" title="Click or scroll down: next slide · scroll up: previous"></canvas>
         <div id="counter">No slides</div>
         <div id="recBadge">● REC 00:00</div>
         <div id="pausedOverlay">❚❚ Paused<small>R to continue · Z to redo this slide · change slides freely while paused</small></div>
@@ -289,7 +289,7 @@
 
     <h2>Shortcuts</h2>
     <p class="note">
-      <kbd>→</kbd> <kbd>Space</kbd> <kbd>PgDn</kbd> next · <kbd>←</kbd> <kbd>PgUp</kbd> previous<br>
+      <kbd>→</kbd> <kbd>Space</kbd> <kbd>PgDn</kbd> next · <kbd>←</kbd> <kbd>PgUp</kbd> previous · click or scroll down on the slides or notes = next, scroll up = previous<br>
       <kbd>R</kbd> record / pause / resume · <kbd>Z</kbd> redo this slide · <kbd>C</kbd> camera · <kbd>H</kbd> hide this panel<br>
       <kbd>T</kbd> practice timer · <kbd>N</kbd> floating notes · <kbd>V</kbd> presenter view · <kbd>+</kbd> <kbd>−</kbd> notes text size · <kbd>Esc</kbd> finish editing<br>
       Presentation clickers work too. Keep this tab open while recording.
@@ -484,6 +484,26 @@ $('#btnScreen').onclick = async () => {
 $('#btnPrev').onclick = prevSlide;
 $('#btnNext').onclick = nextSlide;
 out.onclick = nextSlide;
+// Mouse wheel / trackpad anywhere on the stage (slides, next-slide preview, notes): scroll down for
+// next, up for previous. One step per flick: a trackpad fires dozens of wheel events per gesture, so
+// the rest are ignored for a short while. Notes that are too long to fit scroll as usual first; once
+// they reach the end (or the top), the next flick changes the slide.
+let wheelAt = 0;
+$('#stage').addEventListener('wheel', e => {
+  if (e.target.closest('#notesEdit, #notesHead, input, select, textarea, button')) return;
+  const d = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+  if (Math.abs(d) < 4) return;
+  const txt = e.target.closest('#notesText');
+  if (txt && txt.scrollHeight > txt.clientHeight + 1) {
+    const atEnd = txt.scrollTop + txt.clientHeight >= txt.scrollHeight - 1;
+    if (d > 0 ? !atEnd : txt.scrollTop > 0) return;   // let the notes scroll
+  }
+  e.preventDefault();
+  const now = performance.now();
+  if (now - wheelAt < 350) return;
+  wheelAt = now;
+  if (d > 0) nextSlide(); else prevSlide();
+}, { passive: false });
 
 // ---------- camera + mic ----------
 const camVideo = $('#camVideo');
@@ -1495,6 +1515,7 @@ $('#notesEdit').addEventListener('keydown', e => { if (e.key === 'Escape') setEd
 $('#notesEditBtn').onclick = () => setEditing(!editing);
 $('#notesPrev').onclick = prevSlide;
 $('#notesNext').onclick = nextSlide;
+$('#notesText').onclick = nextSlide;   // clicking the notes (presenter view / floating) = next slide, like the slides
 $('#notesSmaller').onclick = () => notesFont(-2);
 $('#notesBigger').onclick = () => notesFont(2);
 $('#notesClose').onclick = () => { if (S.view === 'presenter') togglePresenter(); else toggleFloat(); };
